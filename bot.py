@@ -45,6 +45,22 @@ VM_LOBBY_NAME    = "🔜 cria sua call, guerreiro(a)"
 VM_DEFAULT_LIMIT = 0     # 0 = sem limite
 VM_EMPTY_DELAY   = 5     # segundos antes de deletar call vazia
 
+TICKETS_FILE = "monstrao_tickets.json"
+
+# Canal padrão do painel de tickets (pode ser trocado com m!ticketpainel #canal)
+DEFAULT_TICKET_CHANNEL_ID = 1499002823202050120
+
+# Imagens padrão do painel — dá pra atualizar com m!setticketimagens caso o link expire
+DEFAULT_TICKET_IMG_URL = "https://cdn.discordapp.com/attachments/1438634577470947429/1447619136091062332/Design_sem_nome_2.gif?ex=6aa425e1&is=6aa2d461&hm=83bc4816173c0190bbcbe75287d26dde1f01105699a936a3c634945db8056a53"
+DEFAULT_TICKET_THUMB_URL = "https://cdn.discordapp.com/attachments/1429893251560636606/1547775993194749982/image.png?ex=6aa4a639&is=6aa354b9&hm=c4ccec7592bef497ccbdba4a6957ff455e1082f5c326f02637f730e62768d068"
+
+# tipo -> (emoji, label, descrição curta pro select)
+TICKET_TIPOS = {
+    "suporte":     ("🛟", "Suporte",     "Dúvidas, ajuda geral e problemas no servidor"),
+    "parceria":    ("🤝", "Parceria",    "Quer fechar uma parceria com a CSI"),
+    "reclamacao":  ("⚠️", "Reclamação", "Denúncias e quebra de regras"),
+}
+
 # ══════════════════════════════════════════════════════════════════
 #  🗄️  PERSISTÊNCIA SIMPLES EM JSON
 # ══════════════════════════════════════════════════════════════════
@@ -1065,6 +1081,199 @@ class BirthdayCog(commands.Cog, name="MonstraoAniversarios"):
 
 
 # ══════════════════════════════════════════════════════════════════
+#  🎫  TICKETS — CENTRAL DE SUPORTE CSI
+# ══════════════════════════════════════════════════════════════════
+
+def _tickets_dados(guild_id: int) -> dict:
+    todos = _load(TICKETS_FILE, {})
+    return todos.get(str(guild_id), {})
+
+
+def _tickets_salvar(guild_id: int, dados: dict) -> None:
+    todos = _load(TICKETS_FILE, {})
+    todos[str(guild_id)] = dados
+    _save(TICKETS_FILE, todos)
+
+
+class TicketFecharView(discord.ui.View):
+    """Botão persistente pra fechar um ticket."""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Fechar Ticket", emoji="🔒", style=discord.ButtonStyle.red, custom_id="monstrao_ticket_fechar")
+    async def fechar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        canal = interaction.channel
+        dados = _tickets_dados(interaction.guild.id)
+        info = dados.get(str(canal.id))
+        if not info:
+            await interaction.response.send_message(embed=embed_erro("esse canal não é um ticket controlado pelo Monstrão!!"), ephemeral=True)
+            return
+        eh_dono = interaction.user.id == info["owner"]
+        eh_staff = interaction.user.guild_permissions.manage_channels
+        if not (eh_dono or eh_staff):
+            await interaction.response.send_message(embed=embed_erro("só quem abriu o ticket ou a staff pode fechar!! 👹"), ephemeral=True)
+            return
+
+        await interaction.response.send_message(embed=embed_ok("🔒 Ticket Fechado!!", "esse canal vai sumir em 5 segundinhos!! valeu por passar na CSI!! 👹🔥"))
+        info["aberto"] = False
+        dados[str(canal.id)] = info
+        _tickets_salvar(interaction.guild.id, dados)
+        await asyncio.sleep(5)
+        try:
+            await canal.delete(reason=f"Ticket fechado por {interaction.user}")
+        except Exception:
+            pass
+
+
+class TicketSelect(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(label=label, value=chave, description=desc, emoji=emoji)
+            for chave, (emoji, label, desc) in TICKET_TIPOS.items()
+        ]
+        super().__init__(
+            placeholder="Selecione uma opção...",
+            min_values=1, max_values=1,
+            options=options,
+            custom_id="monstrao_ticket_select",
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        member = interaction.user
+        tipo = self.values[0]
+        emoji, label, _desc = TICKET_TIPOS[tipo]
+
+        dados = _tickets_dados(guild.id)
+
+        # já tem ticket aberto?
+        for cid, info in dados.items():
+            if info.get("owner") == member.id and info.get("aberto"):
+                canal_existente = guild.get_channel(int(cid))
+                if canal_existente:
+                    await interaction.response.send_message(
+                        embed=embed_erro(f"você já tem um ticket aberto em {canal_existente.mention}!! 👹"), ephemeral=True
+                    )
+                    return
+
+        cfg = get_config(guild.id)
+        categoria = guild.get_channel(cfg.get("ticket_categoria_id")) if cfg.get("ticket_categoria_id") else None
+        cargo_id = cfg.get("ticket_cargo_id")
+        cargo = guild.get_role(cargo_id) if cargo_id else None
+
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            member: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, attach_files=True),
+            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True),
+        }
+        if cargo:
+            overwrites[cargo] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+
+        nome_canal = f"ticket-{tipo}-{member.name}".lower()[:95]
+        try:
+            canal = await guild.create_text_channel(
+                nome_canal, category=categoria, overwrites=overwrites,
+                reason=f"Ticket de {label} aberto por {member}"
+            )
+        except discord.Forbidden:
+            await interaction.response.send_message(embed=embed_erro("sem permissão pra criar o canal do ticket!! 😢"), ephemeral=True)
+            return
+
+        dados[str(canal.id)] = {"owner": member.id, "tipo": tipo, "aberto": True}
+        _tickets_salvar(guild.id, dados)
+
+        embed = embed_info(
+            f"{emoji} Ticket de {label}",
+            f"e aí, {member.mention}!! a equipe da CSI já foi avisada!! explica com calma o que precisa que a gente resolve isso rapidinho!! 👹🔥"
+        )
+        mencao_cargo = cargo.mention if cargo else ""
+        try:
+            await canal.send(content=f"{member.mention} {mencao_cargo}".strip(), embed=embed, view=TicketFecharView())
+        except Exception:
+            pass
+
+        await interaction.response.send_message(embed=embed_ok("🎫 Ticket Criado!!", f"seu ticket foi aberto em {canal.mention}!!"), ephemeral=True)
+
+
+class TicketPainelView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(TicketSelect())
+
+
+class TicketCog(commands.Cog, name="MonstraoTickets"):
+    """👹 Central de Suporte da CSI — sistema de tickets."""
+
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+
+    @commands.command(name="ticketpainel")
+    @commands.has_permissions(manage_guild=True)
+    async def ticket_painel(self, ctx: commands.Context, canal: discord.TextChannel = None):
+        guild = ctx.guild
+        cfg = get_config(guild.id)
+
+        canal_id = canal.id if canal else (cfg.get("ticket_channel_id") or DEFAULT_TICKET_CHANNEL_ID)
+        destino = guild.get_channel(canal_id)
+        if not destino:
+            await ctx.send(embed=embed_erro("não achei esse canal!! confere o ID ou me passa uma menção!!"))
+            return
+        set_config_value(guild.id, "ticket_channel_id", destino.id)
+
+        imagem_url = cfg.get("ticket_imagem_url") or DEFAULT_TICKET_IMG_URL
+        thumb_url = cfg.get("ticket_thumb_url") or DEFAULT_TICKET_THUMB_URL
+
+        embed = discord.Embed(
+            title="🛡️ Central de Suporte CSI 💚🦇",
+            description=(
+                "e aí, guerreiro(a)!! bateu uma dúvida, quer fechar parceria com a CSI ou precisa denunciar "
+                "alguma zoeira fora da linha? 👹\n\n"
+                "abre um ticket ali embaixo que a nossa equipe corre pra te atender!!\n\n"
+                f"{TICKET_TIPOS['suporte'][0]} **Suporte** — {TICKET_TIPOS['suporte'][2]}\n"
+                f"{TICKET_TIPOS['parceria'][0]} **Parceria** — {TICKET_TIPOS['parceria'][2]}\n"
+                f"{TICKET_TIPOS['reclamacao'][0]} **Reclamação** — {TICKET_TIPOS['reclamacao'][2]}"
+            ),
+            color=COR_VERDE,
+        )
+        embed.set_image(url=imagem_url)
+        embed.set_thumbnail(url=thumb_url)
+        embed.set_footer(text="🦇 Cuidado Sedutores da Internet")
+
+        try:
+            await destino.send(embed=embed, view=TicketPainelView())
+        except discord.Forbidden:
+            await ctx.send(embed=embed_erro("sem permissão pra mandar mensagem nesse canal!! 😢"))
+            return
+
+        await ctx.send(embed=embed_ok("✅ Painel Publicado!!", f"central de suporte no ar em {destino.mention}!! 🎫👹"))
+
+    @commands.command(name="setticketcategoria")
+    @commands.has_permissions(manage_guild=True)
+    async def set_ticket_categoria(self, ctx: commands.Context, categoria: discord.CategoryChannel):
+        set_config_value(ctx.guild.id, "ticket_categoria_id", categoria.id)
+        await ctx.send(embed=embed_ok("✅ Categoria de Tickets Definida!!", f"os tickets vão nascer dentro de **{categoria.name}**!! 👹"))
+
+    @commands.command(name="setcargosuporte")
+    @commands.has_permissions(manage_guild=True)
+    async def set_cargo_suporte(self, ctx: commands.Context, cargo: discord.Role):
+        set_config_value(ctx.guild.id, "ticket_cargo_id", cargo.id)
+        await ctx.send(embed=embed_ok("✅ Cargo de Suporte Definido!!", f"{cargo.mention} vai poder ver e responder todos os tickets!! 👹"))
+
+    @commands.command(name="setticketimagens")
+    @commands.has_permissions(manage_guild=True)
+    async def set_ticket_imagens(self, ctx: commands.Context, url_grande: str, url_pequena: str = None):
+        set_config_value(ctx.guild.id, "ticket_imagem_url", url_grande)
+        if url_pequena:
+            set_config_value(ctx.guild.id, "ticket_thumb_url", url_pequena)
+        await ctx.send(embed=embed_ok(
+            "✅ Imagens Atualizadas!!",
+            "as próximas vezes que você mandar `m!ticketpainel` vão usar essas imagens novas!! 👹\n"
+            "(útil se o link antigo expirar, já que links do CDN do Discord vencem depois de um tempo)"
+        ))
+
+
+# ══════════════════════════════════════════════════════════════════
 #  🐲  EVENTOS GLOBAIS DO BOT
 # ══════════════════════════════════════════════════════════════════
 
@@ -1145,6 +1354,12 @@ async def monstrao_help(ctx: commands.Context):
         "`m!gatilhos` · `m!resposta <gatilho>` · `m!simular <texto>`"
     ))
     embed.add_field(name="📋 Logs", inline=False, value="automático, assim que os canais forem configurados!!")
+    embed.add_field(name="🎫 Tickets (Central de Suporte)", inline=False, value=(
+        "`m!ticketpainel [#canal]` — publica/atualiza o painel de tickets\n"
+        "`m!setticketcategoria <categoria>` — onde os tickets nascem\n"
+        "`m!setcargosuporte @cargo` — cargo que enxerga todos os tickets\n"
+        "`m!setticketimagens <url_grande> [url_pequena]` — troca as imagens do painel"
+    ))
     embed.set_footer(text="👹 Monstrão Bot • prefixo: m!")
     await ctx.send(embed=embed)
 
@@ -1180,9 +1395,12 @@ async def _main():
         await bot.add_cog(WelcomeCog(bot))
         await bot.add_cog(DialogueCog(bot))
         await bot.add_cog(BirthdayCog(bot))
+        await bot.add_cog(TicketCog(bot))
 
-        # Registra a view persistente do painel (sobrevive a restarts)
+        # Registra as views persistentes (sobrevivem a restarts)
         bot.add_view(VMPainelView(bot.cogs["MonstraoVoiceMaster"]))
+        bot.add_view(TicketPainelView())
+        bot.add_view(TicketFecharView())
 
         if not TOKEN:
             print("❌ ERRO: token não encontrado! Crie um .env com MONSTRAO_TOKEN=seu_token")
