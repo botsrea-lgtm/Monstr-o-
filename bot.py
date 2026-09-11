@@ -66,6 +66,15 @@ DEFAULT_TICKET_THUMB_URL = "https://cdn.discordapp.com/attachments/1429893251560
 DEFAULT_RECRUTAMENTO_CHANNEL_ID   = 1547787977562783845
 DEFAULT_RECRUTAMENTO_CATEGORIA_ID = 1499002717526556682
 
+# Cargos que sempre podem ver e reivindicar os tickets da central de Recrutamento
+# (independente de qual cargo estiver configurado com m!setcargoticket recrutamento @cargo)
+RECRUTAMENTO_STAFF_ROLE_IDS = [
+    1499002605194706995,
+    1547958453530525747,
+    1547958619268714569,
+    1547958651459870741,
+]
+
 # ══════════════════════════════════════════════════════════════════
 #  🎫  CENTRAIS DE TICKET — cada chave é um painel independente,
 #      com seu próprio canal, categoria e opções no select.
@@ -1190,6 +1199,36 @@ def _tickets_salvar(guild_id: int, dados: dict) -> None:
     _save(TICKETS_FILE, todos)
 
 
+# ── Ficha automática de Recrutamento ───────────────
+
+FICHA_RECRUTAMENTO_INTRO = (
+    "{mention}, chegou a hora!! preenche a ficha abaixo certinho que, assim que você "
+    "terminar, é só aguardar que um staff da CSI vem finalizar seu atendimento com "
+    "você!! 👹🔥"
+)
+
+
+def embed_ficha_recrutamento() -> discord.Embed:
+    e = discord.Embed(
+        title="Ficha de Recrutamento🦇💚",
+        description=(
+            "> **User do Discord:** \n"
+            "> **User do roblox:** \n"
+            "> **Nome de exibição do roblox:** \n"
+            "> **Idade:** \n"
+            "> **Quanto tempo joga Roblox:** \n"
+            "> **Quanto tempo tem sua conta do discord:** \n\n"
+            "> **Já Participou de outros clãs? se sim diga quais:** \n\n"
+            "> *Por fim, nossas cores são preto e verde, concorda e aceita mesmo assim, "
+            "e então se tornar um sedutor da Internet??*\n\n"
+            "> **Sim [ ]  Não [ ]**"
+        ),
+        color=COR_VERDE,
+    )
+    e.set_footer(text="🦇 Cuidado Sedutores da Internet")
+    return e
+
+
 class TicketFecharView(discord.ui.View):
     """Botão persistente pra fechar um ticket (funciona pra qualquer central)."""
 
@@ -1219,6 +1258,65 @@ class TicketFecharView(discord.ui.View):
             await canal.delete(reason=f"Ticket fechado por {interaction.user}")
         except Exception:
             pass
+
+
+class TicketFecharReivindicarView(discord.ui.View):
+    """Fechar + Reivindicar — usado nos tickets da central de Recrutamento, pros
+    cargos definidos em RECRUTAMENTO_STAFF_ROLE_IDS conseguirem assumir o atendimento."""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Fechar Ticket", emoji="🔒", style=discord.ButtonStyle.red, custom_id="monstrao_ticket_fechar")
+    async def fechar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        canal = interaction.channel
+        dados = _tickets_dados(interaction.guild.id)
+        info = dados.get(str(canal.id))
+        if not info:
+            await interaction.response.send_message(embed=embed_erro("esse canal não é um ticket controlado pelo Monstrão!!"), ephemeral=True)
+            return
+        eh_dono = interaction.user.id == info["owner"]
+        eh_staff = interaction.user.guild_permissions.manage_channels
+        if not (eh_dono or eh_staff):
+            await interaction.response.send_message(embed=embed_erro("só quem abriu o ticket ou a staff pode fechar!! 👹"), ephemeral=True)
+            return
+
+        await interaction.response.send_message(embed=embed_ok("🔒 Ticket Fechado!!", "esse canal vai sumir em 5 segundinhos!! valeu por passar na CSI!! 👹🔥"))
+        info["aberto"] = False
+        dados[str(canal.id)] = info
+        _tickets_salvar(interaction.guild.id, dados)
+        await asyncio.sleep(5)
+        try:
+            await canal.delete(reason=f"Ticket fechado por {interaction.user}")
+        except Exception:
+            pass
+
+    @discord.ui.button(label="Reivindicar", emoji="🙋", style=discord.ButtonStyle.green, custom_id="monstrao_ticket_reivindicar")
+    async def reivindicar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        canal = interaction.channel
+        guild = interaction.guild
+        dados = _tickets_dados(guild.id)
+        info = dados.get(str(canal.id))
+        if not info:
+            await interaction.response.send_message(embed=embed_erro("esse canal não é um ticket controlado pelo Monstrão!!"), ephemeral=True)
+            return
+
+        membro = interaction.user
+        tem_cargo = any(r.id in RECRUTAMENTO_STAFF_ROLE_IDS for r in membro.roles)
+        if not (tem_cargo or membro.guild_permissions.manage_channels):
+            await interaction.response.send_message(embed=embed_erro("só a staff de recrutamento pode reivindicar esse ticket!! 👹"), ephemeral=True)
+            return
+
+        if info.get("claimed_by"):
+            dono_atual = guild.get_member(info["claimed_by"])
+            nome_atual = dono_atual.mention if dono_atual else "alguém"
+            await interaction.response.send_message(embed=embed_erro(f"esse ticket já foi reivindicado por {nome_atual}!! 🤔"), ephemeral=True)
+            return
+
+        info["claimed_by"] = membro.id
+        dados[str(canal.id)] = info
+        _tickets_salvar(guild.id, dados)
+        await interaction.response.send_message(embed=embed_ok("🙋 Reivindicado!!", f"{membro.mention} vai cuidar desse atendimento a partir de agora!! 👹🔥"))
 
 
 class TicketSelect(discord.ui.Select):
@@ -1282,6 +1380,15 @@ class TicketSelect(discord.ui.Select):
         if cargo:
             overwrites[cargo] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
 
+        # Central de Recrutamento: os cargos fixos definidos em RECRUTAMENTO_STAFF_ROLE_IDS
+        # sempre enxergam esses tickets e podem reivindicar, além do cargo configurado (se houver).
+        eh_recrutamento = self.central_key == "recrutamento"
+        if eh_recrutamento:
+            for role_id in RECRUTAMENTO_STAFF_ROLE_IDS:
+                role = guild.get_role(role_id)
+                if role:
+                    overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+
         nome_canal = f"ticket-{tipo}-{member.name}".lower()[:95]
         try:
             canal = await guild.create_text_channel(
@@ -1292,7 +1399,7 @@ class TicketSelect(discord.ui.Select):
             await interaction.response.send_message(embed=embed_erro("sem permissão pra criar o canal do ticket!! 😢"), ephemeral=True)
             return
 
-        dados[str(canal.id)] = {"owner": member.id, "tipo": tipo, "aberto": True, "central": self.central_key}
+        dados[str(canal.id)] = {"owner": member.id, "tipo": tipo, "aberto": True, "central": self.central_key, "claimed_by": None}
         _tickets_salvar(guild.id, dados)
 
         embed = embed_info(
@@ -1300,10 +1407,24 @@ class TicketSelect(discord.ui.Select):
             f"e aí, {member.mention}!! a equipe da CSI já foi avisada!! explica com calma o que precisa que a gente resolve isso rapidinho!! 👹🔥"
         )
         mencao_cargo = cargo.mention if cargo else ""
+        view_ticket = TicketFecharReivindicarView() if eh_recrutamento else TicketFecharView()
         try:
-            await canal.send(content=f"{member.mention} {mencao_cargo}".strip(), embed=embed, view=TicketFecharView())
+            await canal.send(content=f"{member.mention} {mencao_cargo}".strip(), embed=embed, view=view_ticket)
         except Exception:
             pass
+
+        # Central de Recrutamento: manda a Ficha de Recrutamento automaticamente 10s depois
+        if eh_recrutamento:
+            async def _enviar_ficha():
+                await asyncio.sleep(10)
+                try:
+                    await canal.send(
+                        content=FICHA_RECRUTAMENTO_INTRO.format(mention=member.mention),
+                        embed=embed_ficha_recrutamento(),
+                    )
+                except Exception:
+                    pass
+            asyncio.create_task(_enviar_ficha())
 
         await interaction.response.send_message(embed=embed_ok("🎫 Ticket Criado!!", f"seu ticket foi aberto em {canal.mention}!!"), ephemeral=True)
 
@@ -1707,7 +1828,9 @@ async def monstrao_help(ctx: commands.Context):
         "`m!ticketpainelrecrutamento [#canal]` — publica/atualiza o de recrutamento\n"
         "`m!setticketcategoria <categoria>` · `m!setcategoriarecrutamento <categoria>`\n"
         "`m!setcargosuporte @cargo` · `m!setcargorecrutamento @cargo`\n"
-        "`m!setticketimagens <url_grande> [url_pequena]`"
+        "`m!setticketimagens <url_grande> [url_pequena]`\n"
+        "*(recrutamento manda a Ficha de Recrutamento automaticamente 10s depois de abrir, "
+        "e os cargos fixos configurados podem ver e reivindicar esses tickets)*"
     ))
     embed.add_field(name="🆕 Tickets — Crie Suas Próprias Centrais!!", inline=False, value=(
         "`m!novacentral <chave> <Título> | <intro>` — cria uma central nova do zero\n"
@@ -1760,6 +1883,7 @@ async def _main():
         for central_key in todas_chaves_centrais_existentes():
             bot.add_view(TicketPainelView(central_key, resolver_central_para_view(central_key)))
         bot.add_view(TicketFecharView())
+        bot.add_view(TicketFecharReivindicarView())
 
         if not TOKEN:
             print("❌ ERRO: token não encontrado! Crie um .env com MONSTRAO_TOKEN=seu_token")
