@@ -69,6 +69,11 @@ DEFAULT_RECRUTAMENTO_CATEGORIA_ID = 1499002717526556682
 # Canal padrão de boas-vindas (usado quando m!setwelcome ainda não foi configurado)
 DEFAULT_WELCOME_CHANNEL_ID = 1499002798434680944
 
+# Canal padrão de log de tickets (usado quando m!setlogtickets ainda não foi configurado) —
+# recebe o log detalhado de TODOS os eventos de ticket (abertura, reivindicação e fechamento),
+# de TODAS as centrais (suporte, recrutamento e qualquer central customizada).
+DEFAULT_TICKET_LOG_CHANNEL_ID = 1547789898919182426
+
 # Cargo que, ao ser concedido a um membro, dispara uma mensagem de boas-vindas
 # especial (com imagem) no canal definido logo abaixo.
 CARGO_BOAS_VINDAS_ESPECIAL_ID = 1499002622881828924
@@ -795,19 +800,21 @@ class ConfigCog(commands.Cog, name="MonstraoConfig"):
     async def config_info(self, ctx: commands.Context):
         cfg = get_config(ctx.guild.id)
 
-        def fmt(key):
-            cid = cfg.get(key)
+        def fmt(key, default_id: int = None):
+            cid = cfg.get(key) or default_id
             ch = ctx.guild.get_channel(cid) if cid else None
-            return ch.mention if ch else "❌ não configurado"
+            if ch:
+                return f"{ch.mention}" + (" `(padrão)`" if not cfg.get(key) and default_id else "")
+            return "❌ não configurado"
 
         embed = embed_info("⚙️ Config Atual do Monstrão", "")
         embed.add_field(name="📞 Log de Voz", value=fmt("log_call_id"), inline=True)
         embed.add_field(name="📝 Log de Chat", value=fmt("log_chat_id"), inline=True)
-        embed.add_field(name="👋 Boas-Vindas", value=fmt("welcome_channel_id"), inline=True)
+        embed.add_field(name="👋 Boas-Vindas", value=fmt("welcome_channel_id", DEFAULT_WELCOME_CHANNEL_ID), inline=True)
         embed.add_field(name="💌 Convites", value=fmt("invite_log_id"), inline=True)
         embed.add_field(name="🎂 Aniversários", value=fmt("birthday_channel_id"), inline=True)
         embed.add_field(name="🎙️ Lobby VM", value=fmt("vm_lobby_id"), inline=True)
-        embed.add_field(name="🎫 Log de Tickets", value=fmt("ticket_log_channel_id"), inline=True)
+        embed.add_field(name="🎫 Log de Tickets", value=fmt("ticket_log_channel_id", DEFAULT_TICKET_LOG_CHANNEL_ID), inline=True)
         await ctx.send(embed=embed)
 
 
@@ -1289,6 +1296,136 @@ def embed_ficha_recrutamento() -> discord.Embed:
     return e
 
 
+# ── Log detalhado de tickets ───────────────────────
+#
+# Cada evento importante do ciclo de vida de um ticket (abertura, reivindicação
+# e fechamento) gera um embed rico e cai no canal configurado com
+# `m!setlogtickets #canal` — ou, se nada for configurado, direto no
+# DEFAULT_TICKET_LOG_CHANNEL_ID. Funciona pra QUALQUER central (suporte,
+# recrutamento ou uma central customizada criada com `m!novacentral`).
+
+def _fmt_duracao(segundos: float) -> str:
+    """Formata uma duração em segundos como algo tipo '1d 2h 14min'."""
+    segundos = max(0, int(segundos))
+    dias, resto = divmod(segundos, 86400)
+    horas, resto = divmod(resto, 3600)
+    minutos, _ = divmod(resto, 60)
+    partes = []
+    if dias:
+        partes.append(f"{dias}d")
+    if horas:
+        partes.append(f"{horas}h")
+    if minutos or not partes:
+        partes.append(f"{minutos}min")
+    return " ".join(partes)
+
+
+def _contar_tickets_central(guild_id: int, central_key: str) -> int:
+    """Quantos tickets (histórico completo, abertos + fechados) essa central já teve."""
+    dados = _tickets_dados(guild_id)
+    return sum(1 for info in dados.values() if info.get("central") == central_key)
+
+
+async def log_ticket_evento(guild: discord.Guild, embed: discord.Embed) -> None:
+    """Manda um embed de log de ticket pro canal configurado com `m!setlogtickets`
+    (ou pro DEFAULT_TICKET_LOG_CHANNEL_ID, se nada foi configurado ainda)."""
+    cfg = get_config(guild.id)
+    canal_id = cfg.get("ticket_log_channel_id") or DEFAULT_TICKET_LOG_CHANNEL_ID
+    if not canal_id:
+        return
+    canal = guild.get_channel(canal_id)
+    if not canal:
+        try:
+            canal = await guild.fetch_channel(canal_id)
+        except Exception:
+            return
+    try:
+        await canal.send(embed=embed)
+    except Exception:
+        pass
+
+
+def _central_label(central_key: str, central: dict = None) -> str:
+    if central:
+        return f"`{central_key}` — {central.get('titulo', central_key)}"
+    return f"`{central_key}`"
+
+
+def embed_log_ticket_criado(member: discord.Member, canal: discord.TextChannel, central_key: str, central: dict, tipo: str) -> discord.Embed:
+    emoji, label, _desc = central["tipos"].get(tipo, ("🎫", tipo, ""))
+    total = _contar_tickets_central(canal.guild.id, central_key)
+    ts = int(datetime.now(timezone.utc).timestamp())
+
+    e = discord.Embed(
+        title=f"{emoji} Ticket Aberto",
+        color=COR_OK,
+        timestamp=datetime.now(timezone.utc),
+    )
+    e.set_author(name=f"{member} • abriu um ticket", icon_url=member.display_avatar.url)
+    e.add_field(name="👤 Aberto por", value=f"{member.mention}\n`{member.id}`", inline=True)
+    e.add_field(name="📁 Central", value=_central_label(central_key, central), inline=True)
+    e.add_field(name="🏷️ Tipo", value=f"{emoji} {label}", inline=True)
+    e.add_field(name="💬 Canal", value=f"{canal.mention}\n`#{canal.name}`", inline=True)
+    e.add_field(name="🕒 Quando", value=f"<t:{ts}:F>\n<t:{ts}:R>", inline=True)
+    e.add_field(name="📊 Nº nessa central", value=f"`{total}º` ticket", inline=True)
+    e.set_thumbnail(url=member.display_avatar.url)
+    e.set_footer(text=f"👹 Monstrão • Log de Tickets • ID do canal: {canal.id}")
+    return e
+
+
+def embed_log_ticket_reivindicado(member: discord.Member, canal: discord.TextChannel, info: dict, central: dict = None) -> discord.Embed:
+    ts = int(datetime.now(timezone.utc).timestamp())
+    e = discord.Embed(
+        title="🙋 Ticket Reivindicado",
+        color=COR_DOURADO,
+        timestamp=datetime.now(timezone.utc),
+    )
+    e.set_author(name=f"{member} • assumiu o atendimento", icon_url=member.display_avatar.url)
+    e.add_field(name="🙋 Reivindicado por", value=f"{member.mention}\n`{member.id}`", inline=True)
+    e.add_field(name="👤 Dono do Ticket", value=f"<@{info.get('owner')}>", inline=True)
+    e.add_field(name="📁 Central", value=_central_label(info.get("central", "?"), central), inline=True)
+    e.add_field(name="🏷️ Tipo", value=f"`{info.get('tipo', '—')}`", inline=True)
+    e.add_field(name="💬 Canal", value=f"{canal.mention}\n`#{canal.name}`", inline=True)
+    e.add_field(name="🕒 Quando", value=f"<t:{ts}:F>\n<t:{ts}:R>", inline=True)
+    e.set_thumbnail(url=member.display_avatar.url)
+    e.set_footer(text=f"👹 Monstrão • Log de Tickets • ID do canal: {canal.id}")
+    return e
+
+
+def embed_log_ticket_fechado(member: discord.Member, canal: discord.TextChannel, info: dict, central: dict = None) -> discord.Embed:
+    ts = int(datetime.now(timezone.utc).timestamp())
+
+    duracao_txt = "desconhecida"
+    aberto_em_str = info.get("aberto_em")
+    if aberto_em_str:
+        try:
+            aberto_em = datetime.fromisoformat(aberto_em_str)
+            duracao_txt = _fmt_duracao((datetime.now(timezone.utc) - aberto_em).total_seconds())
+        except Exception:
+            pass
+
+    e = discord.Embed(
+        title="🔒 Ticket Fechado",
+        color=COR_ERRO,
+        timestamp=datetime.now(timezone.utc),
+    )
+    e.set_author(name=f"{member} • fechou o ticket", icon_url=member.display_avatar.url)
+    e.add_field(name="🔒 Fechado por", value=f"{member.mention}\n`{member.id}`", inline=True)
+    e.add_field(name="👤 Dono do Ticket", value=f"<@{info.get('owner')}>", inline=True)
+
+    claimed_by = info.get("claimed_by")
+    e.add_field(name="🙋 Reivindicado por", value=f"<@{claimed_by}>" if claimed_by else "*ninguém reivindicou*", inline=True)
+
+    e.add_field(name="📁 Central", value=_central_label(info.get("central", "?"), central), inline=True)
+    e.add_field(name="🏷️ Tipo", value=f"`{info.get('tipo', '—')}`", inline=True)
+    e.add_field(name="⏱️ Tempo Aberto", value=duracao_txt, inline=True)
+    e.add_field(name="💬 Canal", value=f"`#{canal.name}`\n`{canal.id}`", inline=True)
+    e.add_field(name="🕒 Fechado em", value=f"<t:{ts}:F>\n<t:{ts}:R>", inline=True)
+    e.set_thumbnail(url=member.display_avatar.url)
+    e.set_footer(text=f"👹 Monstrão • Log de Tickets • ID do canal: {canal.id}")
+    return e
+
+
 class TicketFecharView(discord.ui.View):
     """Botão persistente pra fechar um ticket (funciona pra qualquer central)."""
 
@@ -1311,8 +1448,18 @@ class TicketFecharView(discord.ui.View):
 
         await interaction.response.send_message(embed=embed_ok("🔒 Ticket Fechado!!", "esse canal vai sumir em 5 segundinhos!! valeu por passar na CSI!! 👹🔥"))
         info["aberto"] = False
+        info["fechado_por"] = interaction.user.id
+        info["fechado_em"] = datetime.now(timezone.utc).isoformat()
         dados[str(canal.id)] = info
         _tickets_salvar(interaction.guild.id, dados)
+
+        # 📋 Log detalhado do fechamento
+        try:
+            central = get_central(interaction.guild.id, info.get("central", "suporte"))
+            await log_ticket_evento(interaction.guild, embed_log_ticket_fechado(interaction.user, canal, info, central))
+        except Exception:
+            pass
+
         await asyncio.sleep(5)
         try:
             await canal.delete(reason=f"Ticket fechado por {interaction.user}")
@@ -1343,8 +1490,18 @@ class TicketFecharReivindicarView(discord.ui.View):
 
         await interaction.response.send_message(embed=embed_ok("🔒 Ticket Fechado!!", "esse canal vai sumir em 5 segundinhos!! valeu por passar na CSI!! 👹🔥"))
         info["aberto"] = False
+        info["fechado_por"] = interaction.user.id
+        info["fechado_em"] = datetime.now(timezone.utc).isoformat()
         dados[str(canal.id)] = info
         _tickets_salvar(interaction.guild.id, dados)
+
+        # 📋 Log detalhado do fechamento
+        try:
+            central = get_central(interaction.guild.id, info.get("central", "recrutamento"))
+            await log_ticket_evento(interaction.guild, embed_log_ticket_fechado(interaction.user, canal, info, central))
+        except Exception:
+            pass
+
         await asyncio.sleep(5)
         try:
             await canal.delete(reason=f"Ticket fechado por {interaction.user}")
@@ -1377,6 +1534,13 @@ class TicketFecharReivindicarView(discord.ui.View):
         dados[str(canal.id)] = info
         _tickets_salvar(guild.id, dados)
         await interaction.response.send_message(embed=embed_ok("🙋 Reivindicado!!", f"{membro.mention} vai cuidar desse atendimento a partir de agora!! 👹🔥"))
+
+        # 📋 Log detalhado da reivindicação
+        try:
+            central = get_central(guild.id, info.get("central", "recrutamento"))
+            await log_ticket_evento(guild, embed_log_ticket_reivindicado(membro, canal, info, central))
+        except Exception:
+            pass
 
 
 class TicketSelect(discord.ui.Select):
