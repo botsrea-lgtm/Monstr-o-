@@ -991,6 +991,39 @@ class WelcomeCog(commands.Cog, name="MonstraoWelcome"):
         except Exception:
             pass
 
+    @commands.Cog.listener()
+    async def on_member_update(self, before: discord.Member, after: discord.Member):
+        # ── Cargo especial → manda boas-vindas com imagem no canal dedicado ──
+        cargos_antes = {r.id for r in before.roles}
+        cargos_depois = {r.id for r in after.roles}
+
+        # só dispara quando o cargo é GANHO agora (não tinha antes e tem depois)
+        if CARGO_BOAS_VINDAS_ESPECIAL_ID in cargos_depois and CARGO_BOAS_VINDAS_ESPECIAL_ID not in cargos_antes:
+            guild = after.guild
+            canal = guild.get_channel(CANAL_BOAS_VINDAS_ESPECIAL_ID)
+            if not canal:
+                try:
+                    canal = await guild.fetch_channel(CANAL_BOAS_VINDAS_ESPECIAL_ID)
+                except Exception:
+                    canal = None
+
+            if canal:
+                e = discord.Embed(
+                    title="🎉🦇 Ain, olha quem subiu de nível!!",
+                    description=(
+                        f"parabéns, {after.mention}!! você acabou de conquistar um cargo novo "
+                        f"aqui na família CSI!! 💚🔥\n\nque venham muitas outras conquistas, "
+                        f"guerreiro(a)!! a gente tá muito feliz com você por aqui!! 👹"
+                    ),
+                    color=COR_VERDE, timestamp=datetime.now(timezone.utc)
+                )
+                e.set_image(url=IMAGEM_BOAS_VINDAS_ESPECIAL_URL)
+                e.set_footer(text="👹 Monstrão • CSI")
+                try:
+                    await canal.send(content=after.mention, embed=e)
+                except Exception:
+                    pass
+
 
 # ══════════════════════════════════════════════════════════════════
 #  💬  DIÁLOGO — MONSTRÃO APRENDE A CONVERSAR
