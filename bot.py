@@ -61,13 +61,50 @@ DEFAULT_TICKET_CATEGORIA_ID = 1499002724442837052
 DEFAULT_TICKET_IMG_URL = "https://cdn.discordapp.com/attachments/1438634577470947429/1447619136091062332/Design_sem_nome_2.gif?ex=6aa425e1&is=6aa2d461&hm=83bc4816173c0190bbcbe75287d26dde1f01105699a936a3c634945db8056a53"
 DEFAULT_TICKET_THUMB_URL = "https://cdn.discordapp.com/attachments/1429893251560636606/1547775993194749982/image.png?ex=6aa4a639&is=6aa354b9&hm=c4ccec7592bef497ccbdba4a6957ff455e1082f5c326f02637f730e62768d068"
 
-# tipo -> (emoji, label, descrição curta pro select)
-TICKET_TIPOS = {
-    "suporte":     ("🛟", "Suporte",     "Dúvidas, ajuda geral e problemas no servidor"),
-    "parceria":    ("🤝", "Parceria",    "Quer fechar uma parceria com a CSI"),
-    "reclamacao":  ("⚠️", "Reclamação", "Denúncias e quebra de regras"),
-    "seja_staff":  ("🧑‍💼", "Seja Staff", "Quer entrar pra equipe de staff da CSI"),
+# Canal e categoria padrão da central de Recrutamento (segundo painel, separado do de suporte)
+DEFAULT_RECRUTAMENTO_CHANNEL_ID   = 1547787977562783845
+DEFAULT_RECRUTAMENTO_CATEGORIA_ID = 1499002717526556682
+
+# ══════════════════════════════════════════════════════════════════
+#  🎫  CENTRAIS DE TICKET — cada chave é um painel independente,
+#      com seu próprio canal, categoria e opções no select.
+# ══════════════════════════════════════════════════════════════════
+TICKET_CENTRAIS = {
+    "suporte": {
+        "nome_config":  "ticket",   # prefixo usado nas chaves salvas em CONFIG_FILE
+        "titulo":       "🛡️ Central de Suporte CSI 💚🦇",
+        "intro": (
+            "e aí, guerreiro(a)!! bateu uma dúvida, quer fechar parceria com a CSI, topa entrar "
+            "pra staff ou precisa denunciar alguma zoeira fora da linha? 👹\n\n"
+            "abre um ticket ali embaixo que a nossa equipe corre pra te atender!!"
+        ),
+        "canal_padrao_id":    DEFAULT_TICKET_CHANNEL_ID,
+        "categoria_padrao_id": DEFAULT_TICKET_CATEGORIA_ID,
+        "usar_imagens": True,   # usa as imagens padrão/configuráveis do painel principal
+        # tipo -> (emoji, label, descrição curta pro select)
+        "tipos": {
+            "suporte":     ("🛟", "Suporte",     "Dúvidas, ajuda geral e problemas no servidor"),
+            "parceria":    ("🤝", "Parceria",    "Quer fechar uma parceria com a CSI"),
+            "reclamacao":  ("⚠️", "Reclamação", "Denúncias e quebra de regras"),
+            "seja_staff":  ("🧑‍💼", "Seja Staff", "Quer entrar pra equipe de staff da CSI"),
+        },
+    },
+    "recrutamento": {
+        "nome_config":  "ticket_recrutamento",
+        "titulo":       "📋 Recrutamento CSI 🦇",
+        "intro": (
+            "topa fazer parte da equipe da CSI?? 👹🔥\n\n"
+            "abre um ticket de recrutamento ali embaixo que a staff vem falar com você!!"
+        ),
+        "canal_padrao_id":    DEFAULT_RECRUTAMENTO_CHANNEL_ID,
+        "categoria_padrao_id": DEFAULT_RECRUTAMENTO_CATEGORIA_ID,
+        "usar_imagens": False,
+        "tipos": {
+            "recrutamento": ("📋", "Recrutamento", "Quer se candidatar pra entrar na equipe da CSI"),
+        },
+    },
 }
+
 
 # ══════════════════════════════════════════════════════════════════
 #  🗄️  PERSISTÊNCIA SIMPLES EM JSON
@@ -1089,7 +1126,7 @@ class BirthdayCog(commands.Cog, name="MonstraoAniversarios"):
 
 
 # ══════════════════════════════════════════════════════════════════
-#  🎫  TICKETS — CENTRAL DE SUPORTE CSI
+#  🎫  TICKETS — CENTRAIS DE SUPORTE E RECRUTAMENTO DA CSI
 # ══════════════════════════════════════════════════════════════════
 
 def _tickets_dados(guild_id: int) -> dict:
@@ -1104,7 +1141,7 @@ def _tickets_salvar(guild_id: int, dados: dict) -> None:
 
 
 class TicketFecharView(discord.ui.View):
-    """Botão persistente pra fechar um ticket."""
+    """Botão persistente pra fechar um ticket (funciona pra qualquer central)."""
 
     def __init__(self):
         super().__init__(timeout=None)
@@ -1135,29 +1172,36 @@ class TicketFecharView(discord.ui.View):
 
 
 class TicketSelect(discord.ui.Select):
-    def __init__(self):
+    """Select genérico — cada central de ticket (suporte, recrutamento, etc.) usa uma instância
+    própria, identificada por central_key, apontando pro TICKET_CENTRAIS correspondente."""
+
+    def __init__(self, central_key: str):
+        self.central_key = central_key
+        central = TICKET_CENTRAIS[central_key]
         options = [
             discord.SelectOption(label=label, value=chave, description=desc, emoji=emoji)
-            for chave, (emoji, label, desc) in TICKET_TIPOS.items()
+            for chave, (emoji, label, desc) in central["tipos"].items()
         ]
         super().__init__(
             placeholder="Selecione uma opção...",
             min_values=1, max_values=1,
             options=options,
-            custom_id="monstrao_ticket_select",
+            custom_id=f"monstrao_ticket_select_{central_key}",
         )
 
     async def callback(self, interaction: discord.Interaction):
         guild = interaction.guild
         member = interaction.user
+        central = TICKET_CENTRAIS[self.central_key]
+        prefixo = central["nome_config"]
         tipo = self.values[0]
-        emoji, label, _desc = TICKET_TIPOS[tipo]
+        emoji, label, _desc = central["tipos"][tipo]
 
         dados = _tickets_dados(guild.id)
 
-        # já tem ticket aberto?
+        # já tem ticket aberto nessa mesma central?
         for cid, info in dados.items():
-            if info.get("owner") == member.id and info.get("aberto"):
+            if info.get("owner") == member.id and info.get("aberto") and info.get("central") == self.central_key:
                 canal_existente = guild.get_channel(int(cid))
                 if canal_existente:
                     await interaction.response.send_message(
@@ -1166,14 +1210,15 @@ class TicketSelect(discord.ui.Select):
                     return
 
         cfg = get_config(guild.id)
-        categoria_id = cfg.get("ticket_categoria_id") or DEFAULT_TICKET_CATEGORIA_ID
+        categoria_id = cfg.get(f"{prefixo}_categoria_id") or central["categoria_padrao_id"]
         categoria = guild.get_channel(categoria_id) if categoria_id else None
         if not categoria and categoria_id:
             try:
                 categoria = await guild.fetch_channel(categoria_id)
             except Exception:
                 categoria = None
-        cargo_id = cfg.get("ticket_cargo_id")
+
+        cargo_id = cfg.get(f"{prefixo}_cargo_id") or cfg.get("ticket_cargo_id")
         cargo = guild.get_role(cargo_id) if cargo_id else discord.utils.find(
             lambda r: r.name.lower() == "staff", guild.roles
         )
@@ -1196,7 +1241,7 @@ class TicketSelect(discord.ui.Select):
             await interaction.response.send_message(embed=embed_erro("sem permissão pra criar o canal do ticket!! 😢"), ephemeral=True)
             return
 
-        dados[str(canal.id)] = {"owner": member.id, "tipo": tipo, "aberto": True}
+        dados[str(canal.id)] = {"owner": member.id, "tipo": tipo, "aberto": True, "central": self.central_key}
         _tickets_salvar(guild.id, dados)
 
         embed = embed_info(
@@ -1213,22 +1258,24 @@ class TicketSelect(discord.ui.Select):
 
 
 class TicketPainelView(discord.ui.View):
-    def __init__(self):
+    def __init__(self, central_key: str = "suporte"):
         super().__init__(timeout=None)
-        self.add_item(TicketSelect())
+        self.central_key = central_key
+        self.add_item(TicketSelect(central_key))
 
 
 class TicketCog(commands.Cog, name="MonstraoTickets"):
-    """👹 Central de Suporte da CSI — sistema de tickets."""
+    """👹 Centrais de Suporte e Recrutamento da CSI — sistema de tickets."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    async def _achar_canal_painel(self, guild: discord.Guild, cfg: dict, canal: discord.TextChannel = None):
-        """Resolve o canal onde o painel de tickets deve ficar, com fallback pro fetch caso não esteja em cache."""
+    async def _achar_canal_painel(self, guild: discord.Guild, cfg: dict, central_key: str, canal: discord.TextChannel = None):
+        """Resolve o canal onde o painel dessa central deve ficar, com fallback pro fetch caso não esteja em cache."""
         if canal:
             return canal
-        canal_id = cfg.get("ticket_channel_id") or DEFAULT_TICKET_CHANNEL_ID
+        central = TICKET_CENTRAIS[central_key]
+        canal_id = cfg.get(f"{central['nome_config']}_channel_id") or central["canal_padrao_id"]
         destino = guild.get_channel(canal_id)
         if not destino:
             try:
@@ -1237,86 +1284,106 @@ class TicketCog(commands.Cog, name="MonstraoTickets"):
                 destino = None
         return destino
 
-    async def publicar_painel(self, guild: discord.Guild, canal: discord.TextChannel = None):
-        """Monta e envia o embed do painel de tickets, salvando o canal/mensagem pra próxima checagem automática."""
+    async def publicar_painel(self, guild: discord.Guild, central_key: str, canal: discord.TextChannel = None):
+        """Monta e envia o embed do painel de uma central específica, salvando canal/mensagem pra checagem automática."""
+        central = TICKET_CENTRAIS[central_key]
+        prefixo = central["nome_config"]
         cfg = get_config(guild.id)
-        destino = await self._achar_canal_painel(guild, cfg, canal)
+        destino = await self._achar_canal_painel(guild, cfg, central_key, canal)
         if not destino:
             return None
 
-        set_config_value(guild.id, "ticket_channel_id", destino.id)
-
-        imagem_url = cfg.get("ticket_imagem_url") or DEFAULT_TICKET_IMG_URL
-        thumb_url = cfg.get("ticket_thumb_url") or DEFAULT_TICKET_THUMB_URL
+        set_config_value(guild.id, f"{prefixo}_channel_id", destino.id)
 
         linhas_tipos = "\n".join(
-            f"{emoji} **{label}** — {desc}" for emoji, label, desc in TICKET_TIPOS.values()
+            f"{emoji} **{label}** — {desc}" for emoji, label, desc in central["tipos"].values()
         )
 
         embed = discord.Embed(
-            title="🛡️ Central de Suporte CSI 💚🦇",
-            description=(
-                "e aí, guerreiro(a)!! bateu uma dúvida, quer fechar parceria com a CSI, topa entrar "
-                "pra staff ou precisa denunciar alguma zoeira fora da linha? 👹\n\n"
-                "abre um ticket ali embaixo que a nossa equipe corre pra te atender!!\n\n"
-                f"{linhas_tipos}"
-            ),
+            title=central["titulo"],
+            description=f"{central['intro']}\n\n{linhas_tipos}",
             color=COR_VERDE,
         )
-        embed.set_image(url=imagem_url)
-        embed.set_thumbnail(url=thumb_url)
+        if central.get("usar_imagens"):
+            imagem_url = cfg.get("ticket_imagem_url") or DEFAULT_TICKET_IMG_URL
+            thumb_url = cfg.get("ticket_thumb_url") or DEFAULT_TICKET_THUMB_URL
+            embed.set_image(url=imagem_url)
+            embed.set_thumbnail(url=thumb_url)
         embed.set_footer(text="🦇 Cuidado Sedutores da Internet")
 
         try:
-            msg = await destino.send(embed=embed, view=TicketPainelView())
+            msg = await destino.send(embed=embed, view=TicketPainelView(central_key))
         except discord.Forbidden:
             return None
 
-        set_config_value(guild.id, "ticket_panel_message_id", msg.id)
+        set_config_value(guild.id, f"{prefixo}_panel_message_id", msg.id)
         return msg
 
     @commands.Cog.listener()
     async def on_ready(self):
-        """Lança o painel de tickets sozinho assim que o bot liga — sem precisar rodar m!ticketpainel na mão.
+        """Lança todos os painéis de ticket sozinho assim que o bot liga — sem precisar rodar os comandos na mão.
         Só publica de novo se o painel antigo tiver sumido (canal ainda sem painel ou mensagem apagada)."""
         for guild in self.bot.guilds:
             cfg = get_config(guild.id)
-            destino = await self._achar_canal_painel(guild, cfg)
-            if not destino:
-                continue
+            for central_key, central in TICKET_CENTRAIS.items():
+                prefixo = central["nome_config"]
+                destino = await self._achar_canal_painel(guild, cfg, central_key)
+                if not destino:
+                    continue
 
-            msg_id = cfg.get("ticket_panel_message_id")
-            painel_ainda_existe = False
-            if msg_id:
-                try:
-                    await destino.fetch_message(msg_id)
-                    painel_ainda_existe = True
-                except Exception:
-                    painel_ainda_existe = False
+                msg_id = cfg.get(f"{prefixo}_panel_message_id")
+                painel_ainda_existe = False
+                if msg_id:
+                    try:
+                        await destino.fetch_message(msg_id)
+                        painel_ainda_existe = True
+                    except Exception:
+                        painel_ainda_existe = False
 
-            if not painel_ainda_existe:
-                await self.publicar_painel(guild, destino)
+                if not painel_ainda_existe:
+                    await self.publicar_painel(guild, central_key, destino)
 
     @commands.command(name="ticketpainel")
     @commands.has_permissions(manage_guild=True)
     async def ticket_painel(self, ctx: commands.Context, canal: discord.TextChannel = None):
-        msg = await self.publicar_painel(ctx.guild, canal)
+        msg = await self.publicar_painel(ctx.guild, "suporte", canal)
         if not msg:
             await ctx.send(embed=embed_erro("não consegui publicar o painel!! confere se eu tenho permissão de ver/mandar mensagem nesse canal!! 😢"))
             return
         await ctx.send(embed=embed_ok("✅ Painel Publicado!!", f"central de suporte no ar em {msg.channel.mention}!! 🎫👹"))
 
+    @commands.command(name="ticketpainelrecrutamento", aliases=["painelrecrutamento"])
+    @commands.has_permissions(manage_guild=True)
+    async def ticket_painel_recrutamento(self, ctx: commands.Context, canal: discord.TextChannel = None):
+        msg = await self.publicar_painel(ctx.guild, "recrutamento", canal)
+        if not msg:
+            await ctx.send(embed=embed_erro("não consegui publicar o painel!! confere se eu tenho permissão de ver/mandar mensagem nesse canal!! 😢"))
+            return
+        await ctx.send(embed=embed_ok("✅ Painel Publicado!!", f"central de recrutamento no ar em {msg.channel.mention}!! 📋👹"))
+
     @commands.command(name="setticketcategoria")
     @commands.has_permissions(manage_guild=True)
     async def set_ticket_categoria(self, ctx: commands.Context, categoria: discord.CategoryChannel):
         set_config_value(ctx.guild.id, "ticket_categoria_id", categoria.id)
-        await ctx.send(embed=embed_ok("✅ Categoria de Tickets Definida!!", f"os tickets vão nascer dentro de **{categoria.name}**!! 👹"))
+        await ctx.send(embed=embed_ok("✅ Categoria de Tickets Definida!!", f"os tickets de **suporte** vão nascer dentro de **{categoria.name}**!! 👹"))
+
+    @commands.command(name="setcategoriarecrutamento")
+    @commands.has_permissions(manage_guild=True)
+    async def set_categoria_recrutamento(self, ctx: commands.Context, categoria: discord.CategoryChannel):
+        set_config_value(ctx.guild.id, "ticket_recrutamento_categoria_id", categoria.id)
+        await ctx.send(embed=embed_ok("✅ Categoria de Recrutamento Definida!!", f"os tickets de **recrutamento** vão nascer dentro de **{categoria.name}**!! 👹"))
 
     @commands.command(name="setcargosuporte")
     @commands.has_permissions(manage_guild=True)
     async def set_cargo_suporte(self, ctx: commands.Context, cargo: discord.Role):
         set_config_value(ctx.guild.id, "ticket_cargo_id", cargo.id)
-        await ctx.send(embed=embed_ok("✅ Cargo de Suporte Definido!!", f"{cargo.mention} vai poder ver e responder todos os tickets!! 👹"))
+        await ctx.send(embed=embed_ok("✅ Cargo de Suporte Definido!!", f"{cargo.mention} vai poder ver e responder os tickets (suporte e, se não houver um cargo específico, recrutamento também)!! 👹"))
+
+    @commands.command(name="setcargorecrutamento")
+    @commands.has_permissions(manage_guild=True)
+    async def set_cargo_recrutamento(self, ctx: commands.Context, cargo: discord.Role):
+        set_config_value(ctx.guild.id, "ticket_recrutamento_cargo_id", cargo.id)
+        await ctx.send(embed=embed_ok("✅ Cargo de Recrutamento Definido!!", f"{cargo.mention} vai poder ver e responder os tickets de recrutamento!! 👹"))
 
     @commands.command(name="setticketimagens")
     @commands.has_permissions(manage_guild=True)
@@ -1412,11 +1479,17 @@ async def monstrao_help(ctx: commands.Context):
         "`m!gatilhos` · `m!resposta <gatilho>` · `m!simular <texto>`"
     ))
     embed.add_field(name="📋 Logs", inline=False, value="automático, assim que os canais forem configurados!!")
-    embed.add_field(name="🎫 Tickets (Central de Suporte)", inline=False, value=(
+    embed.add_field(name="🎫 Tickets — Central de Suporte", inline=False, value=(
         "`m!ticketpainel [#canal]` — publica/atualiza o painel de tickets\n"
         "`m!setticketcategoria <categoria>` — onde os tickets nascem\n"
         "`m!setcargosuporte @cargo` — cargo que enxerga todos os tickets\n"
         "`m!setticketimagens <url_grande> [url_pequena]` — troca as imagens do painel"
+    ))
+    embed.add_field(name="📋 Tickets — Central de Recrutamento", inline=False, value=(
+        "`m!ticketpainelrecrutamento [#canal]` — publica/atualiza o painel de recrutamento\n"
+        "`m!setcategoriarecrutamento <categoria>` — onde os tickets de recrutamento nascem\n"
+        "`m!setcargorecrutamento @cargo` — cargo que enxerga os tickets de recrutamento\n"
+        "*(ambos os painéis também sobem sozinhos quando o bot liga)*"
     ))
     embed.set_footer(text="👹 Monstrão Bot • prefixo: m!")
     await ctx.send(embed=embed)
@@ -1457,7 +1530,8 @@ async def _main():
 
         # Registra as views persistentes (sobrevivem a restarts)
         bot.add_view(VMPainelView(bot.cogs["MonstraoVoiceMaster"]))
-        bot.add_view(TicketPainelView())
+        for central_key in TICKET_CENTRAIS:
+            bot.add_view(TicketPainelView(central_key))
         bot.add_view(TicketFecharView())
 
         if not TOKEN:
