@@ -69,6 +69,12 @@ DEFAULT_RECRUTAMENTO_CATEGORIA_ID = 1499002717526556682
 # Canal padrão de boas-vindas (usado quando m!setwelcome ainda não foi configurado)
 DEFAULT_WELCOME_CHANNEL_ID = 1499002798434680944
 
+# Cargo que, ao ser concedido a um membro, dispara uma mensagem de boas-vindas
+# especial (com imagem) no canal definido logo abaixo.
+CARGO_BOAS_VINDAS_ESPECIAL_ID = 1499002622881828924
+CANAL_BOAS_VINDAS_ESPECIAL_ID = 1499002824627847299
+IMAGEM_BOAS_VINDAS_ESPECIAL_URL = "https://cdn.discordapp.com/attachments/926913851172204577/1547980609769709699/ChatGPT_Image_11_de_set._de_2026_11_42_01.png?ex=6aa564c9&is=6aa41349&hm=9dd59c0c3fd0c1b4755d8eb3f835ff34abd12b7d944fb150d66880c589e25124"
+
 # Cargos que sempre podem ver e reivindicar os tickets da central de Recrutamento
 # (independente de qual cargo estiver configurado com m!setcargoticket recrutamento @cargo)
 RECRUTAMENTO_STAFF_ROLE_IDS = [
