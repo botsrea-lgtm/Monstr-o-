@@ -50,6 +50,9 @@ TICKETS_FILE = "monstrao_tickets.json"
 # Canal padrão do painel de tickets (pode ser trocado com m!ticketpainel #canal)
 DEFAULT_TICKET_CHANNEL_ID = 1499002823202050120
 
+# Categoria padrão onde os canais de ticket nascem (pode ser trocada com m!setticketcategoria)
+DEFAULT_TICKET_CATEGORIA_ID = 1499002724442837052
+
 # Imagens padrão do painel — dá pra atualizar com m!setticketimagens caso o link expire
 DEFAULT_TICKET_IMG_URL = "https://cdn.discordapp.com/attachments/1438634577470947429/1447619136091062332/Design_sem_nome_2.gif?ex=6aa425e1&is=6aa2d461&hm=83bc4816173c0190bbcbe75287d26dde1f01105699a936a3c634945db8056a53"
 DEFAULT_TICKET_THUMB_URL = "https://cdn.discordapp.com/attachments/1429893251560636606/1547775993194749982/image.png?ex=6aa4a639&is=6aa354b9&hm=c4ccec7592bef497ccbdba4a6957ff455e1082f5c326f02637f730e62768d068"
@@ -1158,9 +1161,12 @@ class TicketSelect(discord.ui.Select):
                     return
 
         cfg = get_config(guild.id)
-        categoria = guild.get_channel(cfg.get("ticket_categoria_id")) if cfg.get("ticket_categoria_id") else None
+        categoria_id = cfg.get("ticket_categoria_id") or DEFAULT_TICKET_CATEGORIA_ID
+        categoria = guild.get_channel(categoria_id) if categoria_id else None
         cargo_id = cfg.get("ticket_cargo_id")
-        cargo = guild.get_role(cargo_id) if cargo_id else None
+        cargo = guild.get_role(cargo_id) if cargo_id else discord.utils.find(
+            lambda r: r.name.lower() == "staff", guild.roles
+        )
 
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
