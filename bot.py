@@ -112,9 +112,15 @@ TICKET_CENTRAIS = {
         "tipos": {
             "recrutamento": ("📋", "Recrutamento", "Quer se candidatar pra entrar na equipe da CSI"),
             "recrutamento2": ("📋", "Recrutamento 2", "Quer se candidatar pra entrar na equipe da CSI"),
+            "mudanca_nick": ("✏️", "Mudança de Nick", "Quer pedir uma mudança de nick"),
         },
     },
 }
+
+# Tipos da central de Recrutamento que devem receber a Ficha de Recrutamento
+# automática 10s depois de abrir o ticket. "Mudança de Nick" usa a mesma central
+# (mesma staff, mesmo painel) mas NÃO é uma candidatura, então fica de fora daqui.
+TIPOS_QUE_RECEBEM_FICHA_RECRUTAMENTO = {"recrutamento", "recrutamento2"}
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1414,7 +1420,10 @@ class TicketSelect(discord.ui.Select):
             pass
 
         # Central de Recrutamento: manda a Ficha de Recrutamento automaticamente 10s depois
-        if eh_recrutamento:
+        # — mas só pra quem tá de fato se candidatando (Recrutamento / Recrutamento 2).
+        # "Mudança de Nick" usa a mesma central/staff, mas não é uma candidatura, então
+        # não faz sentido mandar a ficha de recrutamento nesse caso.
+        if eh_recrutamento and tipo in TIPOS_QUE_RECEBEM_FICHA_RECRUTAMENTO:
             async def _enviar_ficha():
                 await asyncio.sleep(10)
                 try:
@@ -1441,6 +1450,12 @@ class TicketCog(commands.Cog, name="MonstraoTickets"):
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        # Trava pra publicar os painéis só 1x por processo. O discord.py pode disparar
+        # on_ready mais de uma vez na vida do bot (ex: depois de uma reconexão) — sem essa
+        # trava, cada reconexão rodava o loop de publicação de novo, o que (junto com
+        # qualquer falhazinha de rede/timing no fetch_message) é a receita pra ir
+        # acumulando painéis duplicados no canal a cada restart/reconexão.
+        self._paineis_publicados = False
 
     async def _achar_canal_painel(self, guild: discord.Guild, cfg: dict, central: dict, canal: discord.TextChannel = None):
         """Resolve o canal onde o painel dessa central deve ficar, com fallback pro fetch caso não esteja em cache."""
@@ -1479,9 +1494,12 @@ class TicketCog(commands.Cog, name="MonstraoTickets"):
     async def publicar_painel(self, guild: discord.Guild, central_key: str, canal: discord.TextChannel = None):
         """Publica (ou ATUALIZA, se já existir) o painel de uma central específica.
 
-        Antes: toda vez que rodava o comando, mandava uma mensagem NOVA — duplicando o
-        painel no canal. Agora: se já existe uma mensagem de painel salva e ela ainda
-        existe no Discord, o Monstrão edita ela em vez de criar outra."""
+        1) Se já tem uma mensagem de painel salva em CONFIG_FILE e ela ainda existe no
+           Discord, o Monstrão EDITA ela em vez de mandar uma nova.
+        2) Depois de garantir a mensagem certa, varre as últimas mensagens do canal e
+           apaga qualquer OUTRO painel dessa mesma central que tenha sobrado por lá
+           (de execuções antigas antes desse fix, ou de qualquer falhazinha) — assim
+           só fica UM painel publicado, sempre, mesmo que já tenha duplicado antes."""
         central = get_central(guild.id, central_key)
         if not central:
             return None
@@ -1495,30 +1513,55 @@ class TicketCog(commands.Cog, name="MonstraoTickets"):
         view = TicketPainelView(central_key, central)
 
         msg_id = cfg.get(f"{prefixo}_panel_message_id")
+        msg_final = None
+
         if msg_id:
             try:
                 msg_existente = await destino.fetch_message(msg_id)
                 # já existe e tá no mesmo canal -> edita em vez de duplicar
                 await msg_existente.edit(embed=embed, view=view)
                 set_config_value(guild.id, f"{prefixo}_channel_id", destino.id)
-                return msg_existente
-            except (discord.NotFound, discord.Forbidden):
+                msg_final = msg_existente
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                 pass  # painel antigo sumiu (ou mudou de canal) -> cai pra criar um novo
 
-        set_config_value(guild.id, f"{prefixo}_channel_id", destino.id)
-        try:
-            msg = await destino.send(embed=embed, view=view)
-        except discord.Forbidden:
-            return None
+        if msg_final is None:
+            set_config_value(guild.id, f"{prefixo}_channel_id", destino.id)
+            try:
+                msg_final = await destino.send(embed=embed, view=view)
+            except discord.Forbidden:
+                return None
+            set_config_value(guild.id, f"{prefixo}_panel_message_id", msg_final.id)
 
-        set_config_value(guild.id, f"{prefixo}_panel_message_id", msg.id)
-        return msg
+        # 🧹 limpeza: apaga qualquer outro painel dessa central que tenha sobrado no
+        # canal (mensagens do próprio bot com o mesmo título de embed), garantindo
+        # que só fica UM painel no ar mesmo que já tenha duplicado antes desse fix.
+        try:
+            async for msg in destino.history(limit=50):
+                if msg.id == msg_final.id or msg.author.id != guild.me.id:
+                    continue
+                if msg.embeds and msg.embeds[0].title == central["titulo"]:
+                    try:
+                        await msg.delete()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        return msg_final
 
     @commands.Cog.listener()
     async def on_ready(self):
         """Lança todos os painéis de ticket (fixos + customizados) sozinho assim que o bot
         liga — sem precisar rodar os comandos na mão. publicar_painel já cuida de editar
-        em vez de duplicar caso o painel ainda exista."""
+        em vez de duplicar caso o painel ainda exista (e limpa duplicatas antigas).
+
+        Roda só uma vez por processo (ver self._paineis_publicados): o discord.py pode
+        chamar on_ready de novo depois de reconexões, e sem essa trava esse loop rodava
+        toda vez, o que era a causa dos painéis sendo remandados."""
+        if self._paineis_publicados:
+            return
+        self._paineis_publicados = True
         for guild in self.bot.guilds:
             for central_key in get_todas_centrais(guild.id):
                 await self.publicar_painel(guild, central_key)
