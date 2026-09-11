@@ -37,15 +37,19 @@ TOKEN = os.getenv("MONSTRAO_TOKEN") or os.getenv("TOKEN")
 
 PREFIXOS = ["m!", "M!"]
 
-CONFIG_FILE      = "monstrao_config.json"
-DIALOGO_FILE     = "monstrao_dialogo.json"
-ANIVERSARIO_FILE = "monstrao_aniversarios.json"
+# Pasta de dados persistente (volume do Railway montado em /data).
+# Pode ser trocada com a env var DATA_DIR se precisar rodar local sem o volume.
+DATA_DIR = os.getenv("DATA_DIR", "/data")
+os.makedirs(DATA_DIR, exist_ok=True)
+
+CONFIG_FILE      = os.path.join(DATA_DIR, "monstrao_config.json")
+DIALOGO_FILE     = os.path.join(DATA_DIR, "monstrao_dialogo.json")
+ANIVERSARIO_FILE = os.path.join(DATA_DIR, "monstrao_aniversarios.json")
+TICKETS_FILE     = os.path.join(DATA_DIR, "monstrao_tickets.json")
 
 VM_LOBBY_NAME    = "🔜 cria sua call, guerreiro(a)"
 VM_DEFAULT_LIMIT = 0     # 0 = sem limite
 VM_EMPTY_DELAY   = 5     # segundos antes de deletar call vazia
-
-TICKETS_FILE = "monstrao_tickets.json"
 
 # Canal padrão do painel de tickets (pode ser trocado com m!ticketpainel #canal)
 DEFAULT_TICKET_CHANNEL_ID = 1499002823202050120
@@ -62,6 +66,7 @@ TICKET_TIPOS = {
     "suporte":     ("🛟", "Suporte",     "Dúvidas, ajuda geral e problemas no servidor"),
     "parceria":    ("🤝", "Parceria",    "Quer fechar uma parceria com a CSI"),
     "reclamacao":  ("⚠️", "Reclamação", "Denúncias e quebra de regras"),
+    "seja_staff":  ("🧑‍💼", "Seja Staff", "Quer entrar pra equipe de staff da CSI"),
 }
 
 # ══════════════════════════════════════════════════════════════════
@@ -1163,6 +1168,11 @@ class TicketSelect(discord.ui.Select):
         cfg = get_config(guild.id)
         categoria_id = cfg.get("ticket_categoria_id") or DEFAULT_TICKET_CATEGORIA_ID
         categoria = guild.get_channel(categoria_id) if categoria_id else None
+        if not categoria and categoria_id:
+            try:
+                categoria = await guild.fetch_channel(categoria_id)
+            except Exception:
+                categoria = None
         cargo_id = cfg.get("ticket_cargo_id")
         cargo = guild.get_role(cargo_id) if cargo_id else discord.utils.find(
             lambda r: r.name.lower() == "staff", guild.roles
@@ -1214,31 +1224,42 @@ class TicketCog(commands.Cog, name="MonstraoTickets"):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @commands.command(name="ticketpainel")
-    @commands.has_permissions(manage_guild=True)
-    async def ticket_painel(self, ctx: commands.Context, canal: discord.TextChannel = None):
-        guild = ctx.guild
-        cfg = get_config(guild.id)
-
-        canal_id = canal.id if canal else (cfg.get("ticket_channel_id") or DEFAULT_TICKET_CHANNEL_ID)
+    async def _achar_canal_painel(self, guild: discord.Guild, cfg: dict, canal: discord.TextChannel = None):
+        """Resolve o canal onde o painel de tickets deve ficar, com fallback pro fetch caso não esteja em cache."""
+        if canal:
+            return canal
+        canal_id = cfg.get("ticket_channel_id") or DEFAULT_TICKET_CHANNEL_ID
         destino = guild.get_channel(canal_id)
         if not destino:
-            await ctx.send(embed=embed_erro("não achei esse canal!! confere o ID ou me passa uma menção!!"))
-            return
+            try:
+                destino = await guild.fetch_channel(canal_id)
+            except Exception:
+                destino = None
+        return destino
+
+    async def publicar_painel(self, guild: discord.Guild, canal: discord.TextChannel = None):
+        """Monta e envia o embed do painel de tickets, salvando o canal/mensagem pra próxima checagem automática."""
+        cfg = get_config(guild.id)
+        destino = await self._achar_canal_painel(guild, cfg, canal)
+        if not destino:
+            return None
+
         set_config_value(guild.id, "ticket_channel_id", destino.id)
 
         imagem_url = cfg.get("ticket_imagem_url") or DEFAULT_TICKET_IMG_URL
         thumb_url = cfg.get("ticket_thumb_url") or DEFAULT_TICKET_THUMB_URL
 
+        linhas_tipos = "\n".join(
+            f"{emoji} **{label}** — {desc}" for emoji, label, desc in TICKET_TIPOS.values()
+        )
+
         embed = discord.Embed(
             title="🛡️ Central de Suporte CSI 💚🦇",
             description=(
-                "e aí, guerreiro(a)!! bateu uma dúvida, quer fechar parceria com a CSI ou precisa denunciar "
-                "alguma zoeira fora da linha? 👹\n\n"
+                "e aí, guerreiro(a)!! bateu uma dúvida, quer fechar parceria com a CSI, topa entrar "
+                "pra staff ou precisa denunciar alguma zoeira fora da linha? 👹\n\n"
                 "abre um ticket ali embaixo que a nossa equipe corre pra te atender!!\n\n"
-                f"{TICKET_TIPOS['suporte'][0]} **Suporte** — {TICKET_TIPOS['suporte'][2]}\n"
-                f"{TICKET_TIPOS['parceria'][0]} **Parceria** — {TICKET_TIPOS['parceria'][2]}\n"
-                f"{TICKET_TIPOS['reclamacao'][0]} **Reclamação** — {TICKET_TIPOS['reclamacao'][2]}"
+                f"{linhas_tipos}"
             ),
             color=COR_VERDE,
         )
@@ -1247,12 +1268,43 @@ class TicketCog(commands.Cog, name="MonstraoTickets"):
         embed.set_footer(text="🦇 Cuidado Sedutores da Internet")
 
         try:
-            await destino.send(embed=embed, view=TicketPainelView())
+            msg = await destino.send(embed=embed, view=TicketPainelView())
         except discord.Forbidden:
-            await ctx.send(embed=embed_erro("sem permissão pra mandar mensagem nesse canal!! 😢"))
-            return
+            return None
 
-        await ctx.send(embed=embed_ok("✅ Painel Publicado!!", f"central de suporte no ar em {destino.mention}!! 🎫👹"))
+        set_config_value(guild.id, "ticket_panel_message_id", msg.id)
+        return msg
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        """Lança o painel de tickets sozinho assim que o bot liga — sem precisar rodar m!ticketpainel na mão.
+        Só publica de novo se o painel antigo tiver sumido (canal ainda sem painel ou mensagem apagada)."""
+        for guild in self.bot.guilds:
+            cfg = get_config(guild.id)
+            destino = await self._achar_canal_painel(guild, cfg)
+            if not destino:
+                continue
+
+            msg_id = cfg.get("ticket_panel_message_id")
+            painel_ainda_existe = False
+            if msg_id:
+                try:
+                    await destino.fetch_message(msg_id)
+                    painel_ainda_existe = True
+                except Exception:
+                    painel_ainda_existe = False
+
+            if not painel_ainda_existe:
+                await self.publicar_painel(guild, destino)
+
+    @commands.command(name="ticketpainel")
+    @commands.has_permissions(manage_guild=True)
+    async def ticket_painel(self, ctx: commands.Context, canal: discord.TextChannel = None):
+        msg = await self.publicar_painel(ctx.guild, canal)
+        if not msg:
+            await ctx.send(embed=embed_erro("não consegui publicar o painel!! confere se eu tenho permissão de ver/mandar mensagem nesse canal!! 😢"))
+            return
+        await ctx.send(embed=embed_ok("✅ Painel Publicado!!", f"central de suporte no ar em {msg.channel.mention}!! 🎫👹"))
 
     @commands.command(name="setticketcategoria")
     @commands.has_permissions(manage_guild=True)
