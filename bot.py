@@ -1256,15 +1256,8 @@ class TicketSelect(discord.ui.Select):
 
         dados = _tickets_dados(guild.id)
 
-        # já tem ticket aberto nessa mesma central?
-        for cid, info in dados.items():
-            if info.get("owner") == member.id and info.get("aberto") and info.get("central") == self.central_key:
-                canal_existente = guild.get_channel(int(cid))
-                if canal_existente:
-                    await interaction.response.send_message(
-                        embed=embed_erro(f"você já tem um ticket aberto em {canal_existente.mention}!! 👹"), ephemeral=True
-                    )
-                    return
+        # sem limite de "um ticket por vez" — o mesmo usuário pode abrir quantos
+        # tickets quiser na mesma central, mesmo com outro(s) já aberto(s).
 
         cfg = get_config(guild.id)
         categoria_id = cfg.get(f"{prefixo}_categoria_id") or central["categoria_padrao_id"]
