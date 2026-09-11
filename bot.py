@@ -46,6 +46,7 @@ CONFIG_FILE      = os.path.join(DATA_DIR, "monstrao_config.json")
 DIALOGO_FILE     = os.path.join(DATA_DIR, "monstrao_dialogo.json")
 ANIVERSARIO_FILE = os.path.join(DATA_DIR, "monstrao_aniversarios.json")
 TICKETS_FILE     = os.path.join(DATA_DIR, "monstrao_tickets.json")
+CENTRAIS_CUSTOM_FILE = os.path.join(DATA_DIR, "monstrao_centrais_custom.json")
 
 VM_LOBBY_NAME    = "🔜 cria sua call, guerreiro(a)"
 VM_DEFAULT_LIMIT = 0     # 0 = sem limite
@@ -136,6 +137,54 @@ def set_config_value(guild_id: int, key: str, value) -> None:
     cfg.setdefault(gid, {})
     cfg[gid][key] = value
     _save(CONFIG_FILE, cfg)
+
+
+# ══════════════════════════════════════════════════════════════════
+#  🎫  CENTRAIS CUSTOM — permite criar novas centrais de ticket
+#      (além de Suporte/Recrutamento) sem editar o código.
+# ══════════════════════════════════════════════════════════════════
+
+def _centrais_custom(guild_id: int) -> dict:
+    todos = _load(CENTRAIS_CUSTOM_FILE, {})
+    return todos.get(str(guild_id), {})
+
+
+def _centrais_custom_salvar(guild_id: int, dados: dict) -> None:
+    todos = _load(CENTRAIS_CUSTOM_FILE, {})
+    todos[str(guild_id)] = dados
+    _save(CENTRAIS_CUSTOM_FILE, todos)
+
+
+def get_todas_centrais(guild_id: int) -> dict:
+    """Centrais fixas (suporte/recrutamento) + as customizadas criadas nesse servidor."""
+    todas = dict(TICKET_CENTRAIS)
+    todas.update(_centrais_custom(guild_id))
+    return todas
+
+
+def get_central(guild_id: int, central_key: str):
+    return get_todas_centrais(guild_id).get(central_key)
+
+
+def resolver_central_para_view(central_key: str):
+    """Usada só na hora de registrar as Views persistentes (antes/sem saber a guild
+    certa). Procura primeiro nas centrais fixas, depois em qualquer servidor que
+    já tenha uma central custom com essa chave."""
+    if central_key in TICKET_CENTRAIS:
+        return TICKET_CENTRAIS[central_key]
+    todos_customs = _load(CENTRAIS_CUSTOM_FILE, {})
+    for centrais_da_guild in todos_customs.values():
+        if central_key in centrais_da_guild:
+            return centrais_da_guild[central_key]
+    return None
+
+
+def todas_chaves_centrais_existentes() -> set:
+    chaves = set(TICKET_CENTRAIS.keys())
+    todos_customs = _load(CENTRAIS_CUSTOM_FILE, {})
+    for centrais_da_guild in todos_customs.values():
+        chaves.update(centrais_da_guild.keys())
+    return chaves
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1173,14 +1222,16 @@ class TicketFecharView(discord.ui.View):
 
 class TicketSelect(discord.ui.Select):
     """Select genérico — cada central de ticket (suporte, recrutamento, etc.) usa uma instância
-    própria, identificada por central_key, apontando pro TICKET_CENTRAIS correspondente."""
+    própria, identificada por central_key, apontando pro TICKET_CENTRAIS (ou pra uma central
+    custom) correspondente."""
 
-    def __init__(self, central_key: str):
+    def __init__(self, central_key: str, central_para_options: dict = None):
         self.central_key = central_key
-        central = TICKET_CENTRAIS[central_key]
+        central = central_para_options or resolver_central_para_view(central_key) or {"tipos": {}}
+        tipos = central.get("tipos") or {"placeholder": ("❔", "Sem opções", "Ainda não há opções configuradas")}
         options = [
             discord.SelectOption(label=label, value=chave, description=desc, emoji=emoji)
-            for chave, (emoji, label, desc) in central["tipos"].items()
+            for chave, (emoji, label, desc) in tipos.items()
         ]
         super().__init__(
             placeholder="Selecione uma opção...",
@@ -1192,9 +1243,15 @@ class TicketSelect(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction):
         guild = interaction.guild
         member = interaction.user
-        central = TICKET_CENTRAIS[self.central_key]
+        central = get_central(guild.id, self.central_key)
+        if not central:
+            await interaction.response.send_message(embed=embed_erro("essa central de ticket não existe mais!! avisa a staff!! 🤔"), ephemeral=True)
+            return
         prefixo = central["nome_config"]
         tipo = self.values[0]
+        if tipo not in central["tipos"]:
+            await interaction.response.send_message(embed=embed_erro("essa opção não existe mais nessa central!! tenta de novo!! 🤔"), ephemeral=True)
+            return
         emoji, label, _desc = central["tipos"][tipo]
 
         dados = _tickets_dados(guild.id)
@@ -1258,24 +1315,25 @@ class TicketSelect(discord.ui.Select):
 
 
 class TicketPainelView(discord.ui.View):
-    def __init__(self, central_key: str = "suporte"):
+    def __init__(self, central_key: str = "suporte", central_para_options: dict = None):
         super().__init__(timeout=None)
         self.central_key = central_key
-        self.add_item(TicketSelect(central_key))
+        self.add_item(TicketSelect(central_key, central_para_options))
 
 
 class TicketCog(commands.Cog, name="MonstraoTickets"):
-    """👹 Centrais de Suporte e Recrutamento da CSI — sistema de tickets."""
+    """👹 Centrais de Suporte, Recrutamento e outras (customizadas) da CSI — sistema de tickets."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    async def _achar_canal_painel(self, guild: discord.Guild, cfg: dict, central_key: str, canal: discord.TextChannel = None):
+    async def _achar_canal_painel(self, guild: discord.Guild, cfg: dict, central: dict, canal: discord.TextChannel = None):
         """Resolve o canal onde o painel dessa central deve ficar, com fallback pro fetch caso não esteja em cache."""
         if canal:
             return canal
-        central = TICKET_CENTRAIS[central_key]
-        canal_id = cfg.get(f"{central['nome_config']}_channel_id") or central["canal_padrao_id"]
+        canal_id = cfg.get(f"{central['nome_config']}_channel_id") or central.get("canal_padrao_id")
+        if not canal_id:
+            return None
         destino = guild.get_channel(canal_id)
         if not destino:
             try:
@@ -1284,20 +1342,11 @@ class TicketCog(commands.Cog, name="MonstraoTickets"):
                 destino = None
         return destino
 
-    async def publicar_painel(self, guild: discord.Guild, central_key: str, canal: discord.TextChannel = None):
-        """Monta e envia o embed do painel de uma central específica, salvando canal/mensagem pra checagem automática."""
-        central = TICKET_CENTRAIS[central_key]
-        prefixo = central["nome_config"]
+    def _montar_embed(self, guild: discord.Guild, central: dict) -> discord.Embed:
         cfg = get_config(guild.id)
-        destino = await self._achar_canal_painel(guild, cfg, central_key, canal)
-        if not destino:
-            return None
-
-        set_config_value(guild.id, f"{prefixo}_channel_id", destino.id)
-
         linhas_tipos = "\n".join(
             f"{emoji} **{label}** — {desc}" for emoji, label, desc in central["tipos"].values()
-        )
+        ) or "*(nenhuma opção configurada ainda)*"
 
         embed = discord.Embed(
             title=central["titulo"],
@@ -1310,9 +1359,40 @@ class TicketCog(commands.Cog, name="MonstraoTickets"):
             embed.set_image(url=imagem_url)
             embed.set_thumbnail(url=thumb_url)
         embed.set_footer(text="🦇 Cuidado Sedutores da Internet")
+        return embed
 
+    async def publicar_painel(self, guild: discord.Guild, central_key: str, canal: discord.TextChannel = None):
+        """Publica (ou ATUALIZA, se já existir) o painel de uma central específica.
+
+        Antes: toda vez que rodava o comando, mandava uma mensagem NOVA — duplicando o
+        painel no canal. Agora: se já existe uma mensagem de painel salva e ela ainda
+        existe no Discord, o Monstrão edita ela em vez de criar outra."""
+        central = get_central(guild.id, central_key)
+        if not central:
+            return None
+        prefixo = central["nome_config"]
+        cfg = get_config(guild.id)
+        destino = await self._achar_canal_painel(guild, cfg, central, canal)
+        if not destino:
+            return None
+
+        embed = self._montar_embed(guild, central)
+        view = TicketPainelView(central_key, central)
+
+        msg_id = cfg.get(f"{prefixo}_panel_message_id")
+        if msg_id:
+            try:
+                msg_existente = await destino.fetch_message(msg_id)
+                # já existe e tá no mesmo canal -> edita em vez de duplicar
+                await msg_existente.edit(embed=embed, view=view)
+                set_config_value(guild.id, f"{prefixo}_channel_id", destino.id)
+                return msg_existente
+            except (discord.NotFound, discord.Forbidden):
+                pass  # painel antigo sumiu (ou mudou de canal) -> cai pra criar um novo
+
+        set_config_value(guild.id, f"{prefixo}_channel_id", destino.id)
         try:
-            msg = await destino.send(embed=embed, view=TicketPainelView(central_key))
+            msg = await destino.send(embed=embed, view=view)
         except discord.Forbidden:
             return None
 
@@ -1321,27 +1401,12 @@ class TicketCog(commands.Cog, name="MonstraoTickets"):
 
     @commands.Cog.listener()
     async def on_ready(self):
-        """Lança todos os painéis de ticket sozinho assim que o bot liga — sem precisar rodar os comandos na mão.
-        Só publica de novo se o painel antigo tiver sumido (canal ainda sem painel ou mensagem apagada)."""
+        """Lança todos os painéis de ticket (fixos + customizados) sozinho assim que o bot
+        liga — sem precisar rodar os comandos na mão. publicar_painel já cuida de editar
+        em vez de duplicar caso o painel ainda exista."""
         for guild in self.bot.guilds:
-            cfg = get_config(guild.id)
-            for central_key, central in TICKET_CENTRAIS.items():
-                prefixo = central["nome_config"]
-                destino = await self._achar_canal_painel(guild, cfg, central_key)
-                if not destino:
-                    continue
-
-                msg_id = cfg.get(f"{prefixo}_panel_message_id")
-                painel_ainda_existe = False
-                if msg_id:
-                    try:
-                        await destino.fetch_message(msg_id)
-                        painel_ainda_existe = True
-                    except Exception:
-                        painel_ainda_existe = False
-
-                if not painel_ainda_existe:
-                    await self.publicar_painel(guild, central_key, destino)
+            for central_key in get_todas_centrais(guild.id):
+                await self.publicar_painel(guild, central_key)
 
     @commands.command(name="ticketpainel")
     @commands.has_permissions(manage_guild=True)
@@ -1350,7 +1415,7 @@ class TicketCog(commands.Cog, name="MonstraoTickets"):
         if not msg:
             await ctx.send(embed=embed_erro("não consegui publicar o painel!! confere se eu tenho permissão de ver/mandar mensagem nesse canal!! 😢"))
             return
-        await ctx.send(embed=embed_ok("✅ Painel Publicado!!", f"central de suporte no ar em {msg.channel.mention}!! 🎫👹"))
+        await ctx.send(embed=embed_ok("✅ Painel Atualizado!!", f"central de suporte no ar em {msg.channel.mention}!! 🎫👹"))
 
     @commands.command(name="ticketpainelrecrutamento", aliases=["painelrecrutamento"])
     @commands.has_permissions(manage_guild=True)
@@ -1359,7 +1424,171 @@ class TicketCog(commands.Cog, name="MonstraoTickets"):
         if not msg:
             await ctx.send(embed=embed_erro("não consegui publicar o painel!! confere se eu tenho permissão de ver/mandar mensagem nesse canal!! 😢"))
             return
-        await ctx.send(embed=embed_ok("✅ Painel Publicado!!", f"central de recrutamento no ar em {msg.channel.mention}!! 📋👹"))
+        await ctx.send(embed=embed_ok("✅ Painel Atualizado!!", f"central de recrutamento no ar em {msg.channel.mention}!! 📋👹"))
+
+    # ── Sistema genérico de centrais (crie quantas quiser!) ──────
+
+    @commands.command(name="novacentral")
+    @commands.has_permissions(manage_guild=True)
+    async def nova_central(self, ctx: commands.Context, chave: str, *, titulo_e_intro: str):
+        """Cria uma nova central de ticket do zero.
+        Uso: m!novacentral <chave> <Título> | <texto de introdução>
+        Ex.: m!novacentral eventos 🎉 Central de Eventos CSI | topa organizar um evento com a gente?? abre um ticket ali embaixo!!
+        """
+        chave = chave.lower().strip()
+        if not re.fullmatch(r"[a-z0-9_]+", chave):
+            await ctx.send(embed=embed_erro("a chave só pode ter letras minúsculas, números e `_` (sem espaço/acento)!! ex: `eventos`, `denuncia_staff` 🥲"))
+            return
+        if chave in get_todas_centrais(ctx.guild.id):
+            await ctx.send(embed=embed_erro(f"já existe uma central com a chave `{chave}`!! usa outra ou apaga ela primeiro com `m!removercentral {chave}` 🤔"))
+            return
+
+        if "|" in titulo_e_intro:
+            titulo, intro = titulo_e_intro.split("|", 1)
+        else:
+            titulo, intro = titulo_e_intro, "abre um ticket ali embaixo que a equipe da CSI já vem te atender!! 👹"
+
+        nova = {
+            "nome_config": f"ticket_{chave}",
+            "titulo": titulo.strip(),
+            "intro": intro.strip(),
+            "canal_padrao_id": None,
+            "categoria_padrao_id": None,
+            "usar_imagens": False,
+            "tipos": {},
+        }
+        customs = _centrais_custom(ctx.guild.id)
+        customs[chave] = nova
+        _centrais_custom_salvar(ctx.guild.id, customs)
+        self.bot.add_view(TicketPainelView(chave, nova))  # já registra a view pra funcionar depois de restart
+
+        await ctx.send(embed=embed_ok(
+            "🎉 Central Criada!!",
+            f"central **`{chave}`** criada!! agora:\n"
+            f"1️⃣ `m!addtipoticket {chave} <tipo> <emoji> <label> | <descrição>` — adiciona pelo menos uma opção\n"
+            f"2️⃣ `m!setcategoriaticket {chave} <categoria>` — categoria onde os canais nascem\n"
+            f"3️⃣ `m!publicarcentral {chave} #canal` — publica o painel!! 👹🔥"
+        ))
+
+    @commands.command(name="addtipoticket")
+    @commands.has_permissions(manage_guild=True)
+    async def add_tipo_ticket(self, ctx: commands.Context, chave: str, tipo_id: str, emoji: str, *, label_e_desc: str):
+        """Adiciona uma opção (tipo) ao select de uma central.
+        Uso: m!addtipoticket <chave> <tipo_id> <emoji> <Label> | <descrição curta>
+        """
+        chave = chave.lower().strip()
+        tipo_id = tipo_id.lower().strip()
+        central = get_central(ctx.guild.id, chave)
+        if not central:
+            await ctx.send(embed=embed_erro(f"não existe central com a chave `{chave}`!! confere com `m!listarcentrais` 🤔"))
+            return
+
+        if "|" in label_e_desc:
+            label, desc = label_e_desc.split("|", 1)
+        else:
+            label, desc = label_e_desc, "Selecione essa opção pra abrir esse tipo de ticket"
+
+        if chave in TICKET_CENTRAIS:
+            # centrais fixas ficam só em memória (não persistidas) — ok pro uso do dia a dia,
+            # mas se reiniciar o bot elas voltam ao padrão do código.
+            TICKET_CENTRAIS[chave]["tipos"][tipo_id] = (emoji, label.strip(), desc.strip())
+        else:
+            customs = _centrais_custom(ctx.guild.id)
+            customs[chave]["tipos"][tipo_id] = (emoji, label.strip(), desc.strip())
+            _centrais_custom_salvar(ctx.guild.id, customs)
+
+        self.bot.add_view(TicketPainelView(chave, get_central(ctx.guild.id, chave)))
+        await ctx.send(embed=embed_ok(
+            "✅ Opção Adicionada!!",
+            f"`{tipo_id}` adicionado na central **`{chave}`**!! roda `m!publicarcentral {chave}` pra atualizar o painel!! 👹"
+        ))
+
+    @commands.command(name="removertipoticket")
+    @commands.has_permissions(manage_guild=True)
+    async def remover_tipo_ticket(self, ctx: commands.Context, chave: str, tipo_id: str):
+        chave, tipo_id = chave.lower().strip(), tipo_id.lower().strip()
+        central = get_central(ctx.guild.id, chave)
+        if not central or tipo_id not in central["tipos"]:
+            await ctx.send(embed=embed_erro("não achei essa central/opção!! confere com `m!listarcentrais` 🤔"))
+            return
+        if chave in TICKET_CENTRAIS:
+            del TICKET_CENTRAIS[chave]["tipos"][tipo_id]
+        else:
+            customs = _centrais_custom(ctx.guild.id)
+            del customs[chave]["tipos"][tipo_id]
+            _centrais_custom_salvar(ctx.guild.id, customs)
+        await ctx.send(embed=embed_ok("🗑️ Opção Removida!!", f"`{tipo_id}` removido da central **`{chave}`**!! roda `m!publicarcentral {chave}` pra atualizar o painel!! 👹"))
+
+    @commands.command(name="removercentral")
+    @commands.has_permissions(manage_guild=True)
+    async def remover_central(self, ctx: commands.Context, chave: str):
+        chave = chave.lower().strip()
+        if chave in TICKET_CENTRAIS:
+            await ctx.send(embed=embed_erro("as centrais `suporte` e `recrutamento` são fixas e não podem ser removidas, só editadas!! 🤔"))
+            return
+        customs = _centrais_custom(ctx.guild.id)
+        if chave not in customs:
+            await ctx.send(embed=embed_erro(f"não existe central custom com a chave `{chave}`!! 🤔"))
+            return
+        del customs[chave]
+        _centrais_custom_salvar(ctx.guild.id, customs)
+        await ctx.send(embed=embed_ok("🗑️ Central Removida!!", f"central **`{chave}`** apagada!! (o painel antigo publicado precisa ser apagado manualmente no canal) 👹"))
+
+    @commands.command(name="listarcentrais")
+    async def listar_centrais(self, ctx: commands.Context):
+        todas = get_todas_centrais(ctx.guild.id)
+        if not todas:
+            await ctx.send(embed=embed_info("📋 Centrais de Ticket", "nenhuma central configurada ainda!!"))
+            return
+        desc = "\n".join(
+            f"• **`{chave}`** — {central['titulo']} (`{len(central['tipos'])}` opção(ões))"
+            for chave, central in todas.items()
+        )
+        await ctx.send(embed=embed_info("📋 Centrais de Ticket", desc))
+
+    @commands.command(name="publicarcentral")
+    @commands.has_permissions(manage_guild=True)
+    async def publicar_central(self, ctx: commands.Context, chave: str, canal: discord.TextChannel = None):
+        """Publica (ou atualiza) o painel de QUALQUER central — fixa ou customizada."""
+        chave = chave.lower().strip()
+        central = get_central(ctx.guild.id, chave)
+        if not central:
+            await ctx.send(embed=embed_erro(f"não existe central com a chave `{chave}`!! confere com `m!listarcentrais` 🤔"))
+            return
+        if not central["tipos"]:
+            await ctx.send(embed=embed_erro(f"a central `{chave}` ainda não tem nenhuma opção!! usa `m!addtipoticket {chave} ...` primeiro 🤔"))
+            return
+        msg = await self.publicar_painel(ctx.guild, chave, canal)
+        if not msg:
+            await ctx.send(embed=embed_erro("não consegui publicar!! confere se eu tenho permissão nesse canal (ou se você já rodou `m!setcategoriaticket`)!! 😢"))
+            return
+        await ctx.send(embed=embed_ok("✅ Painel Atualizado!!", f"central **`{chave}`** no ar em {msg.channel.mention}!! 👹🔥"))
+
+    @commands.command(name="setcategoriaticket")
+    @commands.has_permissions(manage_guild=True)
+    async def set_categoria_ticket(self, ctx: commands.Context, chave: str, categoria: discord.CategoryChannel):
+        """Funciona pra qualquer central (suporte, recrutamento ou uma custom)."""
+        chave = chave.lower().strip()
+        central = get_central(ctx.guild.id, chave)
+        if not central:
+            await ctx.send(embed=embed_erro(f"não existe central com a chave `{chave}`!! 🤔"))
+            return
+        set_config_value(ctx.guild.id, f"{central['nome_config']}_categoria_id", categoria.id)
+        await ctx.send(embed=embed_ok("✅ Categoria Definida!!", f"os tickets de **`{chave}`** vão nascer dentro de **{categoria.name}**!! 👹"))
+
+    @commands.command(name="setcargoticket")
+    @commands.has_permissions(manage_guild=True)
+    async def set_cargo_ticket(self, ctx: commands.Context, chave: str, cargo: discord.Role):
+        """Funciona pra qualquer central (suporte, recrutamento ou uma custom)."""
+        chave = chave.lower().strip()
+        central = get_central(ctx.guild.id, chave)
+        if not central:
+            await ctx.send(embed=embed_erro(f"não existe central com a chave `{chave}`!! 🤔"))
+            return
+        set_config_value(ctx.guild.id, f"{central['nome_config']}_cargo_id", cargo.id)
+        await ctx.send(embed=embed_ok("✅ Cargo Definido!!", f"{cargo.mention} vai poder ver e responder os tickets de **`{chave}`**!! 👹"))
+
+    # ── Comandos antigos (mantidos por compatibilidade) ──────────
 
     @commands.command(name="setticketcategoria")
     @commands.has_permissions(manage_guild=True)
@@ -1479,17 +1708,21 @@ async def monstrao_help(ctx: commands.Context):
         "`m!gatilhos` · `m!resposta <gatilho>` · `m!simular <texto>`"
     ))
     embed.add_field(name="📋 Logs", inline=False, value="automático, assim que os canais forem configurados!!")
-    embed.add_field(name="🎫 Tickets — Central de Suporte", inline=False, value=(
-        "`m!ticketpainel [#canal]` — publica/atualiza o painel de tickets\n"
-        "`m!setticketcategoria <categoria>` — onde os tickets nascem\n"
-        "`m!setcargosuporte @cargo` — cargo que enxerga todos os tickets\n"
-        "`m!setticketimagens <url_grande> [url_pequena]` — troca as imagens do painel"
+    embed.add_field(name="🎫 Tickets — Suporte & Recrutamento", inline=False, value=(
+        "`m!ticketpainel [#canal]` — publica/atualiza o painel de suporte\n"
+        "`m!ticketpainelrecrutamento [#canal]` — publica/atualiza o de recrutamento\n"
+        "`m!setticketcategoria <categoria>` · `m!setcategoriarecrutamento <categoria>`\n"
+        "`m!setcargosuporte @cargo` · `m!setcargorecrutamento @cargo`\n"
+        "`m!setticketimagens <url_grande> [url_pequena]`"
     ))
-    embed.add_field(name="📋 Tickets — Central de Recrutamento", inline=False, value=(
-        "`m!ticketpainelrecrutamento [#canal]` — publica/atualiza o painel de recrutamento\n"
-        "`m!setcategoriarecrutamento <categoria>` — onde os tickets de recrutamento nascem\n"
-        "`m!setcargorecrutamento @cargo` — cargo que enxerga os tickets de recrutamento\n"
-        "*(ambos os painéis também sobem sozinhos quando o bot liga)*"
+    embed.add_field(name="🆕 Tickets — Crie Suas Próprias Centrais!!", inline=False, value=(
+        "`m!novacentral <chave> <Título> | <intro>` — cria uma central nova do zero\n"
+        "`m!addtipoticket <chave> <tipo> <emoji> <Label> | <desc>` — adiciona uma opção\n"
+        "`m!removertipoticket <chave> <tipo>` · `m!removercentral <chave>`\n"
+        "`m!setcategoriaticket <chave> <categoria>` · `m!setcargoticket <chave> @cargo`\n"
+        "`m!publicarcentral <chave> [#canal]` — publica/atualiza o painel\n"
+        "`m!listarcentrais` — lista todas as centrais existentes\n"
+        "*(todos os painéis sobem sozinhos quando o bot liga, sem duplicar)*"
     ))
     embed.set_footer(text="👹 Monstrão Bot • prefixo: m!")
     await ctx.send(embed=embed)
@@ -1530,8 +1763,8 @@ async def _main():
 
         # Registra as views persistentes (sobrevivem a restarts)
         bot.add_view(VMPainelView(bot.cogs["MonstraoVoiceMaster"]))
-        for central_key in TICKET_CENTRAIS:
-            bot.add_view(TicketPainelView(central_key))
+        for central_key in todas_chaves_centrais_existentes():
+            bot.add_view(TicketPainelView(central_key, resolver_central_para_view(central_key)))
         bot.add_view(TicketFecharView())
 
         if not TOKEN:
