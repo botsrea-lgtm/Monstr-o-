@@ -102,6 +102,7 @@ TICKET_CENTRAIS = {
         "usar_imagens": False,
         "tipos": {
             "recrutamento": ("📋", "Recrutamento", "Quer se candidatar pra entrar na equipe da CSI"),
+            "recrutamento2": ("📋", "Recrutamento 2", "Quer se candidatar pra entrar na equipe da CSI"),
         },
     },
 }
