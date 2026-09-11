@@ -807,6 +807,7 @@ class ConfigCog(commands.Cog, name="MonstraoConfig"):
         embed.add_field(name="💌 Convites", value=fmt("invite_log_id"), inline=True)
         embed.add_field(name="🎂 Aniversários", value=fmt("birthday_channel_id"), inline=True)
         embed.add_field(name="🎙️ Lobby VM", value=fmt("vm_lobby_id"), inline=True)
+        embed.add_field(name="🎫 Log de Tickets", value=fmt("ticket_log_channel_id"), inline=True)
         await ctx.send(embed=embed)
 
 
@@ -1458,7 +1459,14 @@ class TicketSelect(discord.ui.Select):
             await interaction.response.send_message(embed=embed_erro("sem permissão pra criar o canal do ticket!! 😢"), ephemeral=True)
             return
 
-        dados[str(canal.id)] = {"owner": member.id, "tipo": tipo, "aberto": True, "central": self.central_key, "claimed_by": None}
+        dados[str(canal.id)] = {
+            "owner": member.id,
+            "tipo": tipo,
+            "aberto": True,
+            "central": self.central_key,
+            "claimed_by": None,
+            "aberto_em": datetime.now(timezone.utc).isoformat(),
+        }
         _tickets_salvar(guild.id, dados)
 
         embed = embed_info(
@@ -1469,6 +1477,12 @@ class TicketSelect(discord.ui.Select):
         view_ticket = TicketFecharReivindicarView() if eh_recrutamento else TicketFecharView()
         try:
             await canal.send(content=f"{member.mention} {mencao_cargo}".strip(), embed=embed, view=view_ticket)
+        except Exception:
+            pass
+
+        # 📋 Log detalhado — registra a abertura do ticket no canal de logs
+        try:
+            await log_ticket_evento(guild, embed_log_ticket_criado(member, canal, self.central_key, central, tipo))
         except Exception:
             pass
 
@@ -1837,6 +1851,12 @@ class TicketCog(commands.Cog, name="MonstraoTickets"):
             "(útil se o link antigo expirar, já que links do CDN do Discord vencem depois de um tempo)"
         ))
 
+    @commands.command(name="setlogtickets")
+    @commands.has_permissions(manage_guild=True)
+    async def set_log_tickets(self, ctx: commands.Context, canal: discord.TextChannel):
+        set_config_value(ctx.guild.id, "ticket_log_channel_id", canal.id)
+        await ctx.send(embed=embed_ok("✅ Log de Tickets Definido!!", f"vou registrar abertura, fechamento e reivindicação de TODOS os tickets (qualquer central) em {canal.mention}!! 📋👹"))
+
 
 # ══════════════════════════════════════════════════════════════════
 #  🐲  EVENTOS GLOBAIS DO BOT
@@ -1925,6 +1945,7 @@ async def monstrao_help(ctx: commands.Context):
         "`m!setticketcategoria <categoria>` · `m!setcategoriarecrutamento <categoria>`\n"
         "`m!setcargosuporte @cargo` · `m!setcargorecrutamento @cargo`\n"
         "`m!setticketimagens <url_grande> [url_pequena]`\n"
+        "`m!setlogtickets #canal` — canal que recebe o log detalhado de TODOS os tickets\n"
         "*(recrutamento manda a Ficha de Recrutamento automaticamente 10s depois de abrir, "
         "e os cargos fixos configurados podem ver e reivindicar esses tickets)*"
     ))
@@ -1935,7 +1956,8 @@ async def monstrao_help(ctx: commands.Context):
         "`m!setcategoriaticket <chave> <categoria>` · `m!setcargoticket <chave> @cargo`\n"
         "`m!publicarcentral <chave> [#canal]` — publica/atualiza o painel\n"
         "`m!listarcentrais` — lista todas as centrais existentes\n"
-        "*(todos os painéis sobem sozinhos quando o bot liga, sem duplicar)*"
+        "*(todos os painéis sobem sozinhos quando o bot liga, sem duplicar — e todas as "
+        "centrais, incluindo as suas customizadas, também caem no log de tickets)*"
     ))
     embed.set_footer(text="👹 Monstrão Bot • prefixo: m!")
     await ctx.send(embed=embed)
