@@ -66,6 +66,9 @@ DEFAULT_TICKET_THUMB_URL = "https://cdn.discordapp.com/attachments/1429893251560
 DEFAULT_RECRUTAMENTO_CHANNEL_ID   = 1547787977562783845
 DEFAULT_RECRUTAMENTO_CATEGORIA_ID = 1499002717526556682
 
+# Canal padrão de boas-vindas (usado quando m!setwelcome ainda não foi configurado)
+DEFAULT_WELCOME_CHANNEL_ID = 1499002798434680944
+
 # Cargos que sempre podem ver e reivindicar os tickets da central de Recrutamento
 # (independente de qual cargo estiver configurado com m!setcargoticket recrutamento @cargo)
 RECRUTAMENTO_STAFF_ROLE_IDS = [
@@ -910,20 +913,30 @@ class WelcomeCog(commands.Cog, name="MonstraoWelcome"):
         cfg = get_config(guild.id)
 
         # ── Boas-vindas ──
-        welcome_id = cfg.get("welcome_channel_id")
+        welcome_id = cfg.get("welcome_channel_id") or DEFAULT_WELCOME_CHANNEL_ID
         if welcome_id:
             ch = guild.get_channel(welcome_id)
+            if not ch:
+                try:
+                    ch = await guild.fetch_channel(welcome_id)
+                except Exception:
+                    ch = None
             if ch:
                 e = discord.Embed(
-                    title="🔥 Mais um guerreiro chegou na CSI!!",
-                    description=f"e aí, {member.mention}!! bem-vindo(a) à família CSI!! agora você tem um monstro do seu lado!! 👹💪",
-                    color=COR_LARANJA, timestamp=datetime.now(timezone.utc)
+                    title="🦇💚 Ain, chegou gente nova!!",
+                    description=(
+                        f"oiii {member.mention}, seja muito bem-vindo(a) à família CSI!! 🥰🔥\n\n"
+                        f"a gente fica super feliz de ter você por aqui!! se quiser fazer parte "
+                        f"da nossa staff, é só abrir um ticket de recrutamento em "
+                        f"<#{DEFAULT_RECRUTAMENTO_CHANNEL_ID}> que a equipe te chama rapidinho pra bater um papo!! 💚🦇"
+                    ),
+                    color=COR_VERDE, timestamp=datetime.now(timezone.utc)
                 )
                 if member.display_avatar:
                     e.set_thumbnail(url=member.display_avatar.url)
                 e.set_footer(text=f"👹 Monstrão • agora somos {guild.member_count}")
                 try:
-                    await ch.send(embed=e)
+                    await ch.send(content=member.mention, embed=e)
                 except Exception:
                     pass
 
