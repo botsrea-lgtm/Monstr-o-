@@ -926,9 +926,10 @@ class WelcomeCog(commands.Cog, name="MonstraoWelcome"):
                     title="🦇💚 Ain, chegou gente nova!!",
                     description=(
                         f"oiii {member.mention}, seja muito bem-vindo(a) à família CSI!! 🥰🔥\n\n"
-                        f"a gente fica super feliz de ter você por aqui!! se quiser fazer parte "
-                        f"da nossa staff, é só abrir um ticket de recrutamento em "
-                        f"<#{DEFAULT_RECRUTAMENTO_CHANNEL_ID}> que a equipe te chama rapidinho pra bater um papo!! 💚🦇"
+                        f"a gente fica super feliz de ter você por aqui!! dá uma olhada nos canais "
+                        f"pra se ambientar e, qualquer dúvida, é só chamar a staff!!\n\n"
+                        f"ah, e se um dia bater aquela vontade de fazer parte da equipe, tem um "
+                        f"ticket de recrutamento em <#{DEFAULT_RECRUTAMENTO_CHANNEL_ID}> 💚🦇"
                     ),
                     color=COR_VERDE, timestamp=datetime.now(timezone.utc)
                 )
