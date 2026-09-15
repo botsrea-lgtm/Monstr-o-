@@ -80,6 +80,11 @@ CARGO_BOAS_VINDAS_ESPECIAL_ID = 1499002622881828924
 CANAL_BOAS_VINDAS_ESPECIAL_ID = 1499002824627847299
 IMAGEM_BOAS_VINDAS_ESPECIAL_URL = "https://cdn.discordapp.com/attachments/926913851172204577/1547980609769709699/ChatGPT_Image_11_de_set._de_2026_11_42_01.png?ex=6aa564c9&is=6aa41349&hm=9dd59c0c3fd0c1b4755d8eb3f835ff34abd12b7d944fb150d66880c589e25124"
 
+# Cargo que, ao ser concedido a um membro, dispara uma mensagem de PARCERIA
+# (com imagem) no canal configurado com m!setparceria #canal.
+CARGO_PARCERIA_ID = 1499002646651080794
+IMAGEM_PARCERIA_URL = "https://cdn.discordapp.com/attachments/926913851172204577/1549443648444309584/ChatGPT_Image_15_de_set._de_2026_12_35_40.png?ex=6aaab759&is=6aa965d9&hm=3b2b98ff2fcde5f71857d4630f34aa955124df623da1ded84a2219d6ea7d06d0"
+
 # Cargos que sempre podem ver e reivindicar os tickets da central de Recrutamento
 # (independente de qual cargo estiver configurado com m!setcargoticket recrutamento @cargo)
 RECRUTAMENTO_STAFF_ROLE_IDS = [
@@ -795,6 +800,15 @@ class ConfigCog(commands.Cog, name="MonstraoConfig"):
             f"manda a data assim em {canal.mention}: `15/03` que eu registro!! 🎂👹"
         ))
 
+    @commands.command(name="setparceria")
+    @commands.has_permissions(manage_guild=True)
+    async def set_parceria(self, ctx: commands.Context, canal: discord.TextChannel):
+        set_config_value(ctx.guild.id, "parceria_channel_id", canal.id)
+        await ctx.send(embed=embed_ok(
+            "✅ Canal de Parcerias Definido!!",
+            f"toda vez que alguém ganhar o cargo de parceria eu vou comemorar em {canal.mention}!! 🤝👹"
+        ))
+
     @commands.command(name="configinfo")
     @commands.has_permissions(manage_guild=True)
     async def config_info(self, ctx: commands.Context):
@@ -813,6 +827,7 @@ class ConfigCog(commands.Cog, name="MonstraoConfig"):
         embed.add_field(name="👋 Boas-Vindas", value=fmt("welcome_channel_id", DEFAULT_WELCOME_CHANNEL_ID), inline=True)
         embed.add_field(name="💌 Convites", value=fmt("invite_log_id"), inline=True)
         embed.add_field(name="🎂 Aniversários", value=fmt("birthday_channel_id"), inline=True)
+        embed.add_field(name="🤝 Parcerias", value=fmt("parceria_channel_id"), inline=True)
         embed.add_field(name="🎙️ Lobby VM", value=fmt("vm_lobby_id"), inline=True)
         embed.add_field(name="🎫 Log de Tickets", value=fmt("ticket_log_channel_id", DEFAULT_TICKET_LOG_CHANNEL_ID), inline=True)
         await ctx.send(embed=embed)
@@ -1026,6 +1041,37 @@ class WelcomeCog(commands.Cog, name="MonstraoWelcome"):
                     color=COR_VERDE, timestamp=datetime.now(timezone.utc)
                 )
                 e.set_image(url=IMAGEM_BOAS_VINDAS_ESPECIAL_URL)
+                e.set_footer(text="👹 Monstrão • CSI")
+                try:
+                    await canal.send(content=after.mention, embed=e)
+                except Exception:
+                    pass
+
+        # ── Cargo de parceria → comemora a nova parceria fechada com a CSI ──
+        if CARGO_PARCERIA_ID in cargos_depois and CARGO_PARCERIA_ID not in cargos_antes:
+            guild = after.guild
+            canal_id = get_config(guild.id).get("parceria_channel_id")
+            canal = guild.get_channel(canal_id) if canal_id else None
+            if not canal and canal_id:
+                try:
+                    canal = await guild.fetch_channel(canal_id)
+                except Exception:
+                    canal = None
+
+            if canal:
+                e = discord.Embed(
+                    title="🤝🦇 Nova Parceria Fechada!!",
+                    description=(
+                        f"aeeeee, {after.mention}!! é com o maior orgulho que anunciamos: fechamos "
+                        f"parceria com vocês!! 🔥💚\n\n"
+                        f"a partir de hoje, CSI e vocês caminham lado a lado — uma força a mais pra "
+                        f"gente crescer junto, trocar ideia e fazer a network bombar!! 👹🤝\n\n"
+                        f"que essa parceria renda muita coisa boa pros dois lados e dure pra sempre, "
+                        f"guerreiro(a)!! seja muito bem-vindo(a) à família CSI!! 🦇💜"
+                    ),
+                    color=COR_VERDE, timestamp=datetime.now(timezone.utc)
+                )
+                e.set_image(url=IMAGEM_PARCERIA_URL)
                 e.set_footer(text="👹 Monstrão • CSI")
                 try:
                     await canal.send(content=after.mention, embed=e)
@@ -2092,11 +2138,17 @@ async def monstrao_help(ctx: commands.Context):
     embed.add_field(name="⚙️ Configuração", inline=False, value=(
         "`m!setlogvoz #canal` · `m!setlogchat #canal`\n"
         "`m!setwelcome #canal` · `m!setconvites #canal`\n"
-        "`m!setaniversario #canal` · `m!configinfo`"
+        "`m!setaniversario #canal` · `m!setparceria #canal`\n"
+        "`m!configinfo`"
     ))
     embed.add_field(name="🎂 Aniversários", inline=False, value=(
         "manda `DD/MM` no canal configurado pra registrar\n"
         "`m!meuniver [DD/MM]` · `m!proximosniver`"
+    ))
+    embed.add_field(name="🤝 Parcerias", inline=False, value=(
+        "`m!setparceria #canal` — define onde comemorar novas parcerias\n"
+        "*(assim que o cargo de parceria é dado a alguém, eu já mando a mensagem "
+        "com a imagem automaticamente!!)*"
     ))
     embed.add_field(name="💬 Diálogo & Aprendizado", inline=False, value=(
         "`m!ensinar <gatilho> <resposta>` · `m!esquecer <gatilho>`\n"
