@@ -81,8 +81,9 @@ CANAL_BOAS_VINDAS_ESPECIAL_ID = 1499002824627847299
 IMAGEM_BOAS_VINDAS_ESPECIAL_URL = "https://cdn.discordapp.com/attachments/926913851172204577/1547980609769709699/ChatGPT_Image_11_de_set._de_2026_11_42_01.png?ex=6aa564c9&is=6aa41349&hm=9dd59c0c3fd0c1b4755d8eb3f835ff34abd12b7d944fb150d66880c589e25124"
 
 # Cargo que, ao ser concedido a um membro, dispara uma mensagem de PARCERIA
-# (com imagem) no canal configurado com m!setparceria #canal.
+# (com imagem) sempre no canal fixo definido abaixo.
 CARGO_PARCERIA_ID = 1499002646651080794
+CANAL_PARCERIA_ID = 1499002824627847299
 IMAGEM_PARCERIA_URL = "https://cdn.discordapp.com/attachments/926913851172204577/1549443648444309584/ChatGPT_Image_15_de_set._de_2026_12_35_40.png?ex=6aaab759&is=6aa965d9&hm=3b2b98ff2fcde5f71857d4630f34aa955124df623da1ded84a2219d6ea7d06d0"
 
 # Cargos que sempre podem ver e reivindicar os tickets da central de Recrutamento
@@ -1048,13 +1049,13 @@ class WelcomeCog(commands.Cog, name="MonstraoWelcome"):
                     pass
 
         # ── Cargo de parceria → comemora a nova parceria fechada com a CSI ──
+        # (sempre no canal fixo CANAL_PARCERIA_ID, sem depender de m!setparceria)
         if CARGO_PARCERIA_ID in cargos_depois and CARGO_PARCERIA_ID not in cargos_antes:
             guild = after.guild
-            canal_id = get_config(guild.id).get("parceria_channel_id")
-            canal = guild.get_channel(canal_id) if canal_id else None
-            if not canal and canal_id:
+            canal = guild.get_channel(CANAL_PARCERIA_ID)
+            if not canal:
                 try:
-                    canal = await guild.fetch_channel(canal_id)
+                    canal = await guild.fetch_channel(CANAL_PARCERIA_ID)
                 except Exception:
                     canal = None
 
@@ -2146,9 +2147,8 @@ async def monstrao_help(ctx: commands.Context):
         "`m!meuniver [DD/MM]` · `m!proximosniver`"
     ))
     embed.add_field(name="🤝 Parcerias", inline=False, value=(
-        "`m!setparceria #canal` — define onde comemorar novas parcerias\n"
-        "*(assim que o cargo de parceria é dado a alguém, eu já mando a mensagem "
-        "com a imagem automaticamente!!)*"
+        "toda vez que o cargo de parceria é dado a alguém, eu já mando a mensagem "
+        "com a imagem automaticamente no canal fixo de parcerias!!"
     ))
     embed.add_field(name="💬 Diálogo & Aprendizado", inline=False, value=(
         "`m!ensinar <gatilho> <resposta>` · `m!esquecer <gatilho>`\n"
