@@ -133,6 +133,8 @@ TICKET_CENTRAIS = {
             "recrutamento": ("📋", "Recrutamento", "Quer se candidatar pra entrar na equipe da CSI"),
             "recrutamento2": ("📋", "Recrutamento 2", "Quer se candidatar pra entrar na equipe da CSI"),
             "mudanca_nick": ("✏️", "Mudança de Nick", "Quer pedir uma mudança de nick"),
+            "convidados":   ("🎟️", "Convidados!", "Foi convidado(a) por alguém da CSI"),
+            "parceria":     ("🤝", "Parceria", "Quer fechar uma parceria com a CSI"),
         },
     },
 }
@@ -141,6 +143,10 @@ TICKET_CENTRAIS = {
 # automática 10s depois de abrir o ticket. "Mudança de Nick" usa a mesma central
 # (mesma staff, mesmo painel) mas NÃO é uma candidatura, então fica de fora daqui.
 TIPOS_QUE_RECEBEM_FICHA_RECRUTAMENTO = {"recrutamento", "recrutamento2"}
+
+# Tipos da central de Recrutamento que recebem a Ficha de Parceria automática
+# 10s depois de abrir o ticket.
+TIPOS_QUE_RECEBEM_FICHA_PARCERIA = {"parceria"}
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1343,6 +1349,42 @@ def embed_ficha_recrutamento() -> discord.Embed:
     return e
 
 
+# ── Ficha automática de Parceria ───────────────────
+
+FICHA_PARCERIA_INTRO = (
+    "{mention}, preenche a ficha de parceria abaixo certinho que, assim que você "
+    "terminar, é só aguardar que um staff da CSI vem finalizar o atendimento com "
+    "você!! 🤝🔥"
+)
+
+
+def embed_ficha_parceria() -> discord.Embed:
+    e = discord.Embed(
+        title="Ficha de Parceria 🦇",
+        description=(
+            "> **Nome do Clã/Comunidade:** \n"
+            "> **Tag do Clã/Comunidade:** \n"
+            "> **Emote do Clã/Comunidade:** \n"
+            "> **Cor principal do Clã/Comunidade:** \n"
+            "> **Imagem do Clã/Comunidade:** *(anexar na mensagem)*\n\n"
+            "# Representantes que irão entrar no servidor\n\n"
+            "> **Representante 1:**\n"
+            "> Nome: \n"
+            "> Discord: \n"
+            "> Cargo: \n"
+            "> Nome de exibição no roblox: \n\n"
+            "> **Representante 2:**\n"
+            "> Nome: \n"
+            "> Discord: \n"
+            "> Cargo: \n"
+            "> Nome de exibição no roblox: "
+        ),
+        color=COR_VERDE,
+    )
+    e.set_footer(text="🦇 Cuidado Sedutores da Internet")
+    return e
+
+
 # ── Log detalhado de tickets ───────────────────────
 #
 # Cada evento importante do ciclo de vida de um ticket (abertura, reivindicação
@@ -1697,17 +1739,23 @@ class TicketSelect(discord.ui.Select):
         except Exception:
             pass
 
-        # Central de Recrutamento: manda a Ficha de Recrutamento automaticamente 10s depois
-        # — mas só pra quem tá de fato se candidatando (Recrutamento / Recrutamento 2).
-        # "Mudança de Nick" usa a mesma central/staff, mas não é uma candidatura, então
-        # não faz sentido mandar a ficha de recrutamento nesse caso.
+        # Central de Recrutamento: manda a ficha certa automaticamente 10s depois.
+        #  • Recrutamento / Recrutamento 2 → Ficha de Recrutamento (candidatura)
+        #  • Parceria                      → Ficha de Parceria
+        #  • Mudança de Nick / Convidados  → nenhuma ficha (não são candidatura nem parceria)
+        ficha_intro = ficha_embed = None
         if eh_recrutamento and tipo in TIPOS_QUE_RECEBEM_FICHA_RECRUTAMENTO:
+            ficha_intro, ficha_embed = FICHA_RECRUTAMENTO_INTRO, embed_ficha_recrutamento()
+        elif eh_recrutamento and tipo in TIPOS_QUE_RECEBEM_FICHA_PARCERIA:
+            ficha_intro, ficha_embed = FICHA_PARCERIA_INTRO, embed_ficha_parceria()
+
+        if ficha_embed:
             async def _enviar_ficha():
                 await asyncio.sleep(10)
                 try:
                     await canal.send(
-                        content=FICHA_RECRUTAMENTO_INTRO.format(mention=member.mention),
-                        embed=embed_ficha_recrutamento(),
+                        content=ficha_intro.format(mention=member.mention),
+                        embed=ficha_embed,
                     )
                 except Exception:
                     pass
@@ -2163,6 +2211,7 @@ async def monstrao_help(ctx: commands.Context):
         "`m!setticketimagens <url_grande> [url_pequena]`\n"
         "`m!setlogtickets #canal` — canal que recebe o log detalhado de TODOS os tickets\n"
         "*(recrutamento manda a Ficha de Recrutamento automaticamente 10s depois de abrir, "
+        "a opção Parceria manda a Ficha de Parceria, "
         "e os cargos fixos configurados podem ver e reivindicar esses tickets)*"
     ))
     embed.add_field(name="🆕 Tickets — Crie Suas Próprias Centrais!!", inline=False, value=(
