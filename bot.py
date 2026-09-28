@@ -148,6 +148,10 @@ TIPOS_QUE_RECEBEM_FICHA_RECRUTAMENTO = {"recrutamento", "recrutamento2"}
 # 10s depois de abrir o ticket.
 TIPOS_QUE_RECEBEM_FICHA_PARCERIA = {"parceria"}
 
+# Tipos da central de Recrutamento que recebem a Ficha de Convidados automática
+# 10s depois de abrir o ticket.
+TIPOS_QUE_RECEBEM_FICHA_CONVIDADOS = {"convidados"}
+
 
 # ══════════════════════════════════════════════════════════════════
 #  🗄️  PERSISTÊNCIA SIMPLES EM JSON
@@ -1385,6 +1389,37 @@ def embed_ficha_parceria() -> discord.Embed:
     return e
 
 
+# ── Ficha automática de Convidados ─────────────────
+
+FICHA_CONVIDADOS_INTRO = (
+    "{mention}, seja muito bem-vindo(a)!! preenche a ficha de convidado abaixo certinho "
+    "que, assim que você terminar, é só aguardar que um staff da CSI vem finalizar o "
+    "atendimento com você!! 🎟️🔥"
+)
+
+
+def embed_ficha_convidados() -> discord.Embed:
+    e = discord.Embed(
+        title="Ficha de Convidados 🦇🎟️",
+        description=(
+            "> **User do Discord:** \n"
+            "> **User do roblox:** \n"
+            "> **Nome de exibição do roblox:** \n"
+            "> **Idade:** \n"
+            "> **Quanto tempo tem sua conta do discord:** \n\n"
+            "> **Quem te convidou pra CSI:** \n"
+            "> **Você faz parte de algum clã/comunidade? se sim diga qual:** \n"
+            "> **Qual o motivo da sua visita:** \n\n"
+            "> *Por fim, nossas cores são preto e verde, e você vai ser tratado(a) como "
+            "convidado(a) da família CSI enquanto estiver por aqui. Concorda e aceita?*\n\n"
+            "> **Sim [ ]  Não [ ]**"
+        ),
+        color=COR_VERDE,
+    )
+    e.set_footer(text="🦇 Cuidado Sedutores da Internet")
+    return e
+
+
 # ── Log detalhado de tickets ───────────────────────
 #
 # Cada evento importante do ciclo de vida de um ticket (abertura, reivindicação
@@ -1742,12 +1777,15 @@ class TicketSelect(discord.ui.Select):
         # Central de Recrutamento: manda a ficha certa automaticamente 10s depois.
         #  • Recrutamento / Recrutamento 2 → Ficha de Recrutamento (candidatura)
         #  • Parceria                      → Ficha de Parceria
-        #  • Mudança de Nick / Convidados  → nenhuma ficha (não são candidatura nem parceria)
+        #  • Convidados                    → Ficha de Convidados
+        #  • Mudança de Nick               → nenhuma ficha
         ficha_intro = ficha_embed = None
         if eh_recrutamento and tipo in TIPOS_QUE_RECEBEM_FICHA_RECRUTAMENTO:
             ficha_intro, ficha_embed = FICHA_RECRUTAMENTO_INTRO, embed_ficha_recrutamento()
         elif eh_recrutamento and tipo in TIPOS_QUE_RECEBEM_FICHA_PARCERIA:
             ficha_intro, ficha_embed = FICHA_PARCERIA_INTRO, embed_ficha_parceria()
+        elif eh_recrutamento and tipo in TIPOS_QUE_RECEBEM_FICHA_CONVIDADOS:
+            ficha_intro, ficha_embed = FICHA_CONVIDADOS_INTRO, embed_ficha_convidados()
 
         if ficha_embed:
             async def _enviar_ficha():
@@ -2211,7 +2249,7 @@ async def monstrao_help(ctx: commands.Context):
         "`m!setticketimagens <url_grande> [url_pequena]`\n"
         "`m!setlogtickets #canal` — canal que recebe o log detalhado de TODOS os tickets\n"
         "*(recrutamento manda a Ficha de Recrutamento automaticamente 10s depois de abrir, "
-        "a opção Parceria manda a Ficha de Parceria, "
+        "a opção Parceria manda a Ficha de Parceria, a opção Convidados manda a Ficha de Convidados, "
         "e os cargos fixos configurados podem ver e reivindicar esses tickets)*"
     ))
     embed.add_field(name="🆕 Tickets — Crie Suas Próprias Centrais!!", inline=False, value=(
