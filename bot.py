@@ -76,9 +76,15 @@ DEFAULT_TICKET_LOG_CHANNEL_ID = 1547789898919182426
 
 # Cargo que, ao ser concedido a um membro, dispara uma mensagem de boas-vindas
 # especial (com imagem) no canal definido logo abaixo.
-CARGO_BOAS_VINDAS_ESPECIAL_ID = 1499002622881828924
+CARGO_BOAS_VINDAS_ESPECIAL_ID = 1522444449651626024
 CANAL_BOAS_VINDAS_ESPECIAL_ID = 1499002824627847299
 IMAGEM_BOAS_VINDAS_ESPECIAL_URL = "https://cdn.discordapp.com/attachments/926913851172204577/1547980609769709699/ChatGPT_Image_11_de_set._de_2026_11_42_01.png?ex=6aa564c9&is=6aa41349&hm=9dd59c0c3fd0c1b4755d8eb3f835ff34abd12b7d944fb150d66880c589e25124"
+
+# Cargo de Visitante — ao ser concedido, dispara sua própria mensagem de
+# boas-vindas (com imagem) sempre no canal fixo definido abaixo.
+CARGO_VISITANTE_ID = 1499002622881828924
+CANAL_VISITANTE_ID = 1499002824627847299
+IMAGEM_VISITANTE_URL = "https://cdn.discordapp.com/attachments/926913851172204577/1553980703362777138/ChatGPT_Image_28_de_set._de_2026_01_04_15.png?ex=6abb38cf&is=6ab9e74f&hm=21fb4f6e0bd8a1b15fcfd52692a4b2739ccde2558d8f3440bcb22a74fa3dae4e"
 
 # Cargo que, ao ser concedido a um membro, dispara uma mensagem de PARCERIA
 # (com imagem) sempre no canal fixo definido abaixo.
@@ -1083,6 +1089,36 @@ class WelcomeCog(commands.Cog, name="MonstraoWelcome"):
                     color=COR_VERDE, timestamp=datetime.now(timezone.utc)
                 )
                 e.set_image(url=IMAGEM_PARCERIA_URL)
+                e.set_footer(text="👹 Monstrão • CSI")
+                try:
+                    await canal.send(content=after.mention, embed=e)
+                except Exception:
+                    pass
+
+        # ── Cargo de visitante → dá as boas-vindas própria pra quem virou visitante ──
+        # (sempre no canal fixo CANAL_VISITANTE_ID, sem depender de m!setwelcome)
+        if CARGO_VISITANTE_ID in cargos_depois and CARGO_VISITANTE_ID not in cargos_antes:
+            guild = after.guild
+            canal = guild.get_channel(CANAL_VISITANTE_ID)
+            if not canal:
+                try:
+                    canal = await guild.fetch_channel(CANAL_VISITANTE_ID)
+                except Exception:
+                    canal = None
+
+            if canal:
+                e = discord.Embed(
+                    title="🎟️🦇 Ain, chegou um(a) visitante!!",
+                    description=(
+                        f"e aí, {after.mention}!! você virou visitante aqui na família CSI!! 👋🔥\n\n"
+                        f"fica à vontade pra dar uma olhada em tudo, bater um papo com a galera e "
+                        f"conhecer nosso cantinho!! qualquer dúvida é só chamar a staff!!\n\n"
+                        f"e se curtir a vibe e quiser ficar de vez, é só abrir um ticket que a gente "
+                        f"te recebe de braços abertos, guerreiro(a)!! 👹💚"
+                    ),
+                    color=COR_VERDE, timestamp=datetime.now(timezone.utc)
+                )
+                e.set_image(url=IMAGEM_VISITANTE_URL)
                 e.set_footer(text="👹 Monstrão • CSI")
                 try:
                     await canal.send(content=after.mention, embed=e)
