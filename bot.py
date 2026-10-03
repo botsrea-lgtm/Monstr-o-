@@ -47,6 +47,7 @@ DIALOGO_FILE     = os.path.join(DATA_DIR, "monstrao_dialogo.json")
 ANIVERSARIO_FILE = os.path.join(DATA_DIR, "monstrao_aniversarios.json")
 TICKETS_FILE     = os.path.join(DATA_DIR, "monstrao_tickets.json")
 CENTRAIS_CUSTOM_FILE = os.path.join(DATA_DIR, "monstrao_centrais_custom.json")
+CONVITES_FILE    = os.path.join(DATA_DIR, "monstrao_convites.json")   # contagem de convites (persistente)
 
 VM_LOBBY_NAME    = "🔜 cria sua call, guerreiro(a)"
 VM_DEFAULT_LIMIT = 0     # 0 = sem limite
@@ -68,6 +69,9 @@ DEFAULT_RECRUTAMENTO_CATEGORIA_ID = 1499002717526556682
 
 # Canal padrão de boas-vindas (usado quando m!setwelcome ainda não foi configurado)
 DEFAULT_WELCOME_CHANNEL_ID = 1499002798434680944
+
+# Canal padrão do log de convites (usado quando m!setconvites ainda não foi configurado)
+DEFAULT_INVITE_LOG_CHANNEL_ID = 1554532119865200670
 
 # Canal padrão de log de tickets (usado quando m!setlogtickets ainda não foi configurado) —
 # recebe o log detalhado de TODOS os eventos de ticket (abertura, reivindicação e fechamento),
@@ -189,6 +193,36 @@ def set_config_value(guild_id: int, key: str, value) -> None:
     cfg.setdefault(gid, {})
     cfg[gid][key] = value
     _save(CONFIG_FILE, cfg)
+
+
+# ══════════════════════════════════════════════════════════════════
+#  💌  CONVITES — contagem persistente (fica no /data, não zera ao reiniciar)
+# ══════════════════════════════════════════════════════════════════
+
+def _convites_dados(guild_id: int) -> dict:
+    todos = _load(CONVITES_FILE, {})
+    d = todos.get(str(guild_id), {})
+    d.setdefault("contagem", {})   # inviter_id -> total de convites
+    d.setdefault("membros", {})    # member_id  -> {"inviter": id, "code": "abc"}
+    return d
+
+
+def _convites_salvar(guild_id: int, dados: dict) -> None:
+    todos = _load(CONVITES_FILE, {})
+    todos[str(guild_id)] = dados
+    _save(CONVITES_FILE, todos)
+
+
+def registrar_convite(guild_id: int, member_id: int, inviter_id: int, code: str) -> int:
+    """Salva no /data quem convidou quem e devolve o total atual do convidador.
+    Se o mesmo membro sair e voltar pelo convite da mesma pessoa, não conta duas vezes."""
+    dados = _convites_dados(guild_id)
+    anterior = dados["membros"].get(str(member_id))
+    if not (anterior and anterior.get("inviter") == inviter_id):
+        dados["contagem"][str(inviter_id)] = dados["contagem"].get(str(inviter_id), 0) + 1
+    dados["membros"][str(member_id)] = {"inviter": inviter_id, "code": code}
+    _convites_salvar(guild_id, dados)
+    return dados["contagem"].get(str(inviter_id), 0)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -842,7 +876,7 @@ class ConfigCog(commands.Cog, name="MonstraoConfig"):
         embed.add_field(name="📞 Log de Voz", value=fmt("log_call_id"), inline=True)
         embed.add_field(name="📝 Log de Chat", value=fmt("log_chat_id"), inline=True)
         embed.add_field(name="👋 Boas-Vindas", value=fmt("welcome_channel_id", DEFAULT_WELCOME_CHANNEL_ID), inline=True)
-        embed.add_field(name="💌 Convites", value=fmt("invite_log_id"), inline=True)
+        embed.add_field(name="💌 Convites", value=fmt("invite_log_id", DEFAULT_INVITE_LOG_CHANNEL_ID), inline=True)
         embed.add_field(name="🎂 Aniversários", value=fmt("birthday_channel_id"), inline=True)
         embed.add_field(name="🤝 Parcerias", value=fmt("parceria_channel_id"), inline=True)
         embed.add_field(name="🎙️ Lobby VM", value=fmt("vm_lobby_id"), inline=True)
@@ -931,14 +965,77 @@ class WelcomeCog(commands.Cog, name="MonstraoWelcome"):
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.invite_cache: dict[int, dict[str, int]] = {}   # guild_id -> {code: uses}
+        # guild_id -> {code: {"uses": int, "max": int, "inviter": int|None}}
+        self.invite_cache: dict[int, dict[str, dict]] = {}
+        self._locks: dict[int, asyncio.Lock] = {}
+
+    def _lock(self, guild_id: int) -> asyncio.Lock:
+        return self._locks.setdefault(guild_id, asyncio.Lock())
+
+    @staticmethod
+    def _snapshot(invites) -> dict:
+        return {
+            inv.code: {
+                "uses": inv.uses or 0,
+                "max": inv.max_uses or 0,
+                "inviter": inv.inviter.id if inv.inviter else None,
+            }
+            for inv in invites
+        }
 
     async def _cache_guild_invites(self, guild: discord.Guild):
         try:
-            invites = await guild.invites()
-            self.invite_cache[guild.id] = {inv.code: inv.uses for inv in invites}
-        except discord.Forbidden:
+            self.invite_cache[guild.id] = self._snapshot(await guild.invites())
+        except (discord.Forbidden, discord.HTTPException):
             self.invite_cache[guild.id] = {}
+
+    async def _get_channel(self, guild: discord.Guild, channel_id):
+        if not channel_id:
+            return None
+        ch = guild.get_channel(channel_id)
+        if not ch:
+            try:
+                ch = await guild.fetch_channel(channel_id)
+            except Exception:
+                ch = None
+        return ch
+
+    async def _detectar_convite(self, guild: discord.Guild):
+        """Compara os convites de agora com o cache e descobre qual foi usado.
+        Devolve {"code", "inviter_id"} ou None se não deu pra descobrir."""
+        try:
+            atuais = await guild.invites()
+        except (discord.Forbidden, discord.HTTPException):
+            return None
+
+        antigo = self.invite_cache.get(guild.id)
+        novo = self._snapshot(atuais)
+        self.invite_cache[guild.id] = novo
+        if antigo is None:
+            return None
+
+        # 1) convite cujo número de usos subiu
+        for code, d in novo.items():
+            if d["uses"] > antigo.get(code, {}).get("uses", 0):
+                return {"code": code, "inviter_id": d["inviter"]}
+
+        # 2) convite de uso limitado que sumiu (foi usado pela última vez e o Discord apagou)
+        for code, d in antigo.items():
+            if code not in novo and d["max"] > 0 and d["uses"] + 1 >= d["max"]:
+                return {"code": code, "inviter_id": d["inviter"]}
+
+        return None
+
+    async def _resolver_usuario(self, guild: discord.Guild, user_id):
+        if not user_id:
+            return None
+        u = guild.get_member(user_id)
+        if u:
+            return u
+        try:
+            return await self.bot.fetch_user(user_id)
+        except Exception:
+            return None
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -946,11 +1043,23 @@ class WelcomeCog(commands.Cog, name="MonstraoWelcome"):
             await self._cache_guild_invites(guild)
 
     @commands.Cog.listener()
+    async def on_guild_join(self, guild: discord.Guild):
+        await self._cache_guild_invites(guild)
+
+    @commands.Cog.listener()
     async def on_invite_create(self, invite: discord.Invite):
-        self.invite_cache.setdefault(invite.guild.id, {})[invite.code] = invite.uses
+        self.invite_cache.setdefault(invite.guild.id, {})[invite.code] = {
+            "uses": invite.uses or 0,
+            "max": invite.max_uses or 0,
+            "inviter": invite.inviter.id if invite.inviter else None,
+        }
 
     @commands.Cog.listener()
     async def on_invite_delete(self, invite: discord.Invite):
+        # Espera uns segundos antes de tirar do cache: convites de uso único são apagados
+        # pelo Discord logo depois de usados, e o on_member_join ainda precisa enxergar
+        # esse convite no cache pra saber que foi ele.
+        await asyncio.sleep(10)
         self.invite_cache.get(invite.guild.id, {}).pop(invite.code, None)
 
     @commands.Cog.listener()
@@ -958,62 +1067,96 @@ class WelcomeCog(commands.Cog, name="MonstraoWelcome"):
         guild = member.guild
         cfg = get_config(guild.id)
 
-        # ── Boas-vindas ──
-        welcome_id = cfg.get("welcome_channel_id") or DEFAULT_WELCOME_CHANNEL_ID
-        if welcome_id:
-            ch = guild.get_channel(welcome_id)
-            if not ch:
-                try:
-                    ch = await guild.fetch_channel(welcome_id)
-                except Exception:
-                    ch = None
-            if ch:
-                e = discord.Embed(
-                    title="🦇💚 Ain, chegou gente nova!!",
-                    description=(
-                        f"oiii {member.mention}, seja muito bem-vindo(a) à família CSI!! 🥰🔥\n\n"
-                        f"a gente fica super feliz de ter você por aqui!! dá uma olhada nos canais "
-                        f"pra se ambientar e, qualquer dúvida, é só chamar a staff!!\n\n"
-                        f"ah, e se um dia bater aquela vontade de fazer parte da equipe, tem um "
-                        f"ticket de recrutamento em <#{DEFAULT_RECRUTAMENTO_CHANNEL_ID}> 💚🦇"
-                    ),
-                    color=COR_VERDE, timestamp=datetime.now(timezone.utc)
-                )
-                if member.display_avatar:
-                    e.set_thumbnail(url=member.display_avatar.url)
-                e.set_footer(text=f"👹 Monstrão • agora somos {guild.member_count}")
-                try:
-                    await ch.send(content=member.mention, embed=e)
-                except Exception:
-                    pass
+        # ── 1) descobre qual convite foi usado e grava no /data ──
+        async with self._lock(guild.id):
+            usado = await self._detectar_convite(guild)
 
-        # ── Convites ──
-        invite_log_id = cfg.get("invite_log_id")
-        if invite_log_id:
-            log_ch = guild.get_channel(invite_log_id)
-            usado = None
+        inviter = None
+        total = 0
+        if usado and usado["inviter_id"]:
+            inviter = await self._resolver_usuario(guild, usado["inviter_id"])
+            total = registrar_convite(guild.id, member.id, usado["inviter_id"], usado["code"])
+
+        # ── 2) boas-vindas (agora dizendo quem convidou) ──
+        welcome_id = cfg.get("welcome_channel_id") or DEFAULT_WELCOME_CHANNEL_ID
+        ch = await self._get_channel(guild, welcome_id)
+        if ch:
+            linha_convite = ""
+            if inviter:
+                linha_convite = (
+                    f"\n\npor sinal, quem trouxe você pra cá foi {inviter.mention} 💌 "
+                    f"— valeu por trazer gente boa pra família!! 🔥"
+                )
+            e = discord.Embed(
+                title="🦇💚 Ain, chegou gente nova!!",
+                description=(
+                    f"oiii {member.mention}, seja muito bem-vindo(a) à família CSI!! 🥰🔥\n\n"
+                    f"a gente fica super feliz de ter você por aqui!! dá uma olhada nos canais "
+                    f"pra se ambientar e, qualquer dúvida, é só chamar a staff!!\n\n"
+                    f"ah, e se um dia bater aquela vontade de fazer parte da equipe, tem um "
+                    f"ticket de recrutamento em <#{DEFAULT_RECRUTAMENTO_CHANNEL_ID}> 💚🦇"
+                    f"{linha_convite}"
+                ),
+                color=COR_VERDE, timestamp=datetime.now(timezone.utc)
+            )
+            if member.display_avatar:
+                e.set_thumbnail(url=member.display_avatar.url)
+            e.set_footer(text=f"👹 Monstrão • agora somos {guild.member_count}")
             try:
-                invites_atuais = await guild.invites()
-                cache_antigo = self.invite_cache.get(guild.id, {})
-                for inv in invites_atuais:
-                    if inv.uses > cache_antigo.get(inv.code, 0):
-                        usado = inv
-                        break
-                self.invite_cache[guild.id] = {inv.code: inv.uses for inv in invites_atuais}
-            except discord.Forbidden:
+                await ch.send(content=member.mention, embed=e)
+            except Exception:
                 pass
 
-            if log_ch:
-                if usado:
-                    desc = f"{member.mention} entrou usando o convite de **{usado.inviter}** (código `{usado.code}`, {usado.uses} usos)"
-                else:
-                    desc = f"{member.mention} entrou, mas não consegui identificar o convite usado!! 🤔"
-                e = discord.Embed(description=desc, color=COR_AZUL, timestamp=datetime.now(timezone.utc))
-                e.set_footer(text="👹 Monstrão • Convites")
-                try:
-                    await log_ch.send(embed=e)
-                except Exception:
-                    pass
+        # ── 3) log de convites (embed no estilo da Lilu) ──
+        log_ch = await self._get_channel(guild, cfg.get("invite_log_id") or DEFAULT_INVITE_LOG_CHANNEL_ID)
+        if not log_ch:
+            return
+
+        if usado and usado["inviter_id"]:
+            inviter_mention = inviter.mention if inviter else f"<@{usado['inviter_id']}>"
+            inviter_nome = inviter.name if inviter else "desconhecido"
+
+            e = discord.Embed(
+                title="💌 Novo Convite Usado!!",
+                description=(
+                    f"{member.mention} entrou no servidor usando o convite de {inviter_mention}!!\n\n"
+                    f"🔗 Código do convite: `{usado['code']}`"
+                ),
+                color=COR_AZUL, timestamp=datetime.now(timezone.utc)
+            )
+            e.add_field(name="👤 Quem entrou", value=f"{member.name}\n(`{member.id}`)", inline=True)
+            e.add_field(name="💌 Quem convidou", value=f"{inviter_nome}\n(`{usado['inviter_id']}`)", inline=True)
+            e.add_field(name="🔗 Código", value=f"`{usado['code']}`", inline=True)
+            e.add_field(
+                name="🎉 Total de convites",
+                value=f"{inviter_mention} já tem **{total}** convite{'s' if total != 1 else ''}!!",
+                inline=False,
+            )
+        else:
+            e = discord.Embed(
+                title="💌 Novo Membro!!",
+                description=f"{member.mention} entrou no servidor, mas não consegui descobrir qual convite foi usado!! 🤔",
+                color=COR_AZUL, timestamp=datetime.now(timezone.utc)
+            )
+            e.add_field(name="👤 Quem entrou", value=f"{member.name}\n(`{member.id}`)", inline=True)
+
+        e.set_thumbnail(url=member.display_avatar.url)
+        e.set_footer(text="👹 Monstrão • log de convites")
+        try:
+            await log_ch.send(embed=e)
+        except Exception:
+            pass
+
+    # ── comando extra: ver quantos convites alguém tem ──
+    @commands.command(name="convites", aliases=["invites"])
+    async def convites(self, ctx: commands.Context, membro: discord.Member = None):
+        membro = membro or ctx.author
+        total = _convites_dados(ctx.guild.id)["contagem"].get(str(membro.id), 0)
+        await ctx.send(embed=embed_info(
+            "💌 Convites",
+            f"{membro.mention} já trouxe **{total}** guerreiro{'s' if total != 1 else ''} pra CSI!! 👹🔥",
+            cor=COR_AZUL,
+        ))
 
     @commands.Cog.listener()
     async def on_member_remove(self, member: discord.Member):
@@ -2263,6 +2406,10 @@ async def monstrao_help(ctx: commands.Context):
         "`m!setwelcome #canal` · `m!setconvites #canal`\n"
         "`m!setaniversario #canal` · `m!setparceria #canal`\n"
         "`m!configinfo`"
+    ))
+    embed.add_field(name="💌 Convites", inline=False, value=(
+        "o log de convites e o \"convidado por\" das boas-vindas são automáticos!!\n"
+        "`m!convites [@pessoa]` — quantos convites alguém já tem"
     ))
     embed.add_field(name="🎂 Aniversários", inline=False, value=(
         "manda `DD/MM` no canal configurado pra registrar\n"
