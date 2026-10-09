@@ -79,6 +79,9 @@ DEFAULT_INVITE_LOG_CHANNEL_ID = 1554532119865200670
 # de TODAS as centrais (suporte, recrutamento e qualquer central customizada).
 DEFAULT_TICKET_LOG_CHANNEL_ID = 1547789898919182426
 
+# Canal que recebe o alerta do comando m!investigar (contas suspeitas de serem a mesma pessoa/IP)
+CANAL_INVESTIGAR_ID = 1304658654292869206
+
 # Fuso usado nos horários DENTRO do arquivo de transcript (Brasília = UTC-3)
 FUSO_BR = timezone(timedelta(hours=-3))
 
@@ -2778,6 +2781,90 @@ async def on_ready():
 
 
 # ══════════════════════════════════════════════════════════════════
+#  🕵️  INVESTIGAR — alerta de contas com o mesmo IP (funciona no PV do bot)
+# ══════════════════════════════════════════════════════════════════
+#
+# Uso (no PV do bot ou em qualquer canal):   m!investigar <id> e <id>
+#
+# IMPORTANTE: o Discord NÃO entrega IP de ninguém pra bots, então o Monstrão não
+# consegue verificar o IP sozinho. O comando funciona como um "alerta manual":
+# quem tem permissão confirma por outro meio (ex.: sistema de verificação, log do
+# jogo, etc.) e o bot posta o aviso no canal CANAL_INVESTIGAR_ID, deixando claro
+# quem fez a denúncia.
+
+@bot.command(name="investigar", aliases=["investigar_ip", "mesmoip"])
+async def investigar(ctx: commands.Context, *, ids: str = ""):
+    # acha o canal de alertas (e o servidor dele) mesmo se o comando veio do PV
+    try:
+        canal = bot.get_channel(CANAL_INVESTIGAR_ID) or await bot.fetch_channel(CANAL_INVESTIGAR_ID)
+    except Exception:
+        await ctx.send(embed=embed_erro("não consegui acessar o canal de alertas!! confere se eu tenho permissão lá 😢"))
+        return
+    guild = canal.guild
+
+    # só quem tem "Gerenciar Servidor" no servidor do canal pode usar
+    membro = guild.get_member(ctx.author.id)
+    if membro is None:
+        try:
+            membro = await guild.fetch_member(ctx.author.id)
+        except Exception:
+            membro = None
+    if membro is None or not (membro.guild_permissions.manage_guild or membro.guild_permissions.administrator):
+        await ctx.send(embed=embed_erro("você não tem permissão pra usar esse comando!! 👹"))
+        return
+
+    # aceita "m!investigar 111 222" ou "m!investigar 111 e 222"
+    encontrados = list(dict.fromkeys(re.findall(r"\d{15,20}", ids)))
+    if len(encontrados) != 2:
+        await ctx.send(embed=embed_erro("manda exatamente dois IDs!! ex: `m!investigar 123456789012345678 e 987654321098765432` 🕵️"))
+        return
+    id1, id2 = (int(x) for x in encontrados)
+
+    async def _info(uid: int):
+        user = None
+        try:
+            user = await bot.fetch_user(uid)
+        except Exception:
+            pass
+        m = guild.get_member(uid)
+        if user is None and m is None:
+            return f"❌ não achei ninguém com o ID `{uid}`"
+        u = m or user
+        linhas = [
+            f"{u.mention} (`{u.name}`)",
+            f"ID: `{uid}`",
+            f"Conta criada: <t:{int(u.created_at.timestamp())}:R>",
+        ]
+        if m and m.joined_at:
+            linhas.append(f"Entrou na CSI: <t:{int(m.joined_at.timestamp())}:R>")
+        else:
+            linhas.append("Não está no servidor")
+        return "\n".join(linhas)
+
+    info1, info2 = await _info(id1), await _info(id2)
+
+    e = discord.Embed(
+        title="🚨 Alerta — Contas com o Mesmo IP",
+        description=(
+            f"<@{id1}> e <@{id2}> foram apontadas como **duas contas com o mesmo IP**!! 🕵️👹\n\n"
+            f"investigação aberta por {ctx.author.mention} — a staff precisa dar uma olhada nisso!!"
+        ),
+        color=COR_ERRO, timestamp=datetime.now(timezone.utc),
+    )
+    e.add_field(name="👤 Conta 1", value=info1, inline=True)
+    e.add_field(name="👤 Conta 2", value=info2, inline=True)
+    e.add_field(name="🕵️ Denunciado por", value=f"{ctx.author.mention} (`{ctx.author.id}`)", inline=False)
+    e.set_footer(text="👹 Monstrão • Investigação (IP informado pela staff, não verificado pelo bot)")
+
+    try:
+        await canal.send(embed=e)
+    except Exception:
+        await ctx.send(embed=embed_erro("não consegui mandar o alerta no canal!! confere minhas permissões lá 😢"))
+        return
+    await ctx.send(embed=embed_ok("🕵️ Alerta Enviado!!", f"avisei em {canal.mention} sobre `{id1}` e `{id2}`!! 👹🔥"))
+
+
+# ══════════════════════════════════════════════════════════════════
 #  📋  COMANDOS GERAIS
 # ══════════════════════════════════════════════════════════════════
 
@@ -2816,6 +2903,10 @@ async def monstrao_help(ctx: commands.Context):
     embed.add_field(name="💬 Diálogo & Aprendizado", inline=False, value=(
         "`m!ensinar <gatilho> <resposta>` · `m!esquecer <gatilho>`\n"
         "`m!gatilhos` · `m!resposta <gatilho>` · `m!simular <texto>`"
+    ))
+    embed.add_field(name="🕵️ Investigação", inline=False, value=(
+        "`m!investigar <id> e <id>` — (pode mandar no PV do bot) avisa no canal de alertas "
+        "que duas contas foram apontadas como mesmo IP *(só staff com Gerenciar Servidor)*"
     ))
     embed.add_field(name="📋 Logs", inline=False, value="automático, assim que os canais forem configurados!!")
     embed.add_field(name="🎫 Tickets — Suporte & Recrutamento", inline=False, value=(
