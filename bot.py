@@ -1515,37 +1515,12 @@ def _tickets_salvar(guild_id: int, dados: dict) -> None:
     _save(TICKETS_FILE, todos)
 
 
-# ── Ficha automática de Recrutamento ───────────────
-
 FICHA_RECRUTAMENTO_INTRO = (
     "{mention}, chegou a hora!! preenche a ficha abaixo certinho que, assim que você "
     "terminar, é só aguardar que um staff da CSI vem finalizar seu atendimento com "
     "você!! 👹🔥"
 )
 
-
-def embed_ficha_recrutamento() -> discord.Embed:
-    e = discord.Embed(
-        title="Ficha de Recrutamento🦇💚",
-        description=(
-            "> **User do Discord:** \n"
-            "> **User do roblox:** \n"
-            "> **Nome de exibição do roblox:** \n"
-            "> **Idade:** \n"
-            "> **Quanto tempo joga Roblox:** \n"
-            "> **Quanto tempo tem sua conta do discord:** \n\n"
-            "> **Já Participou de outros clãs? se sim diga quais:** \n\n"
-            "> *Por fim, nossas cores são preto e verde, concorda e aceita mesmo assim, "
-            "e então se tornar um sedutor da Internet??*\n\n"
-            "> **Sim [ ]  Não [ ]**"
-        ),
-        color=COR_VERDE,
-    )
-    e.set_footer(text="🦇 Cuidado Sedutores da Internet")
-    return e
-
-
-# ── Ficha automática de Parceria ───────────────────
 
 FICHA_PARCERIA_INTRO = (
     "{mention}, preenche a ficha de parceria abaixo certinho que, assim que você "
@@ -1554,35 +1529,6 @@ FICHA_PARCERIA_INTRO = (
 )
 
 
-def embed_ficha_parceria() -> discord.Embed:
-    e = discord.Embed(
-        title="Ficha de Parceria 🦇",
-        description=(
-            "> **Nome do Clã/Comunidade:** \n"
-            "> **Tag do Clã/Comunidade:** \n"
-            "> **Emote do Clã/Comunidade:** \n"
-            "> **Cor principal do Clã/Comunidade:** \n"
-            "> **Imagem do Clã/Comunidade:** *(anexar na mensagem)*\n\n"
-            "# Representantes que irão entrar no servidor\n\n"
-            "> **Representante 1:**\n"
-            "> Nome: \n"
-            "> Discord: \n"
-            "> Cargo: \n"
-            "> Nome de exibição no roblox: \n\n"
-            "> **Representante 2:**\n"
-            "> Nome: \n"
-            "> Discord: \n"
-            "> Cargo: \n"
-            "> Nome de exibição no roblox: "
-        ),
-        color=COR_VERDE,
-    )
-    e.set_footer(text="🦇 Cuidado Sedutores da Internet")
-    return e
-
-
-# ── Ficha automática de Convidados ─────────────────
-
 FICHA_CONVIDADOS_INTRO = (
     "{mention}, seja muito bem-vindo(a)!! preenche a ficha de convidado abaixo certinho "
     "que, assim que você terminar, é só aguardar que um staff da CSI vem finalizar o "
@@ -1590,26 +1536,334 @@ FICHA_CONVIDADOS_INTRO = (
 )
 
 
-def embed_ficha_convidados() -> discord.Embed:
-    e = discord.Embed(
-        title="Ficha de Convidados 🦇🎟️",
-        description=(
-            "> **User do Discord:** \n"
-            "> **User do roblox:** \n"
-            "> **Nome de exibição do roblox:** \n"
-            "> **Idade:** \n"
-            "> **Quanto tempo tem sua conta do discord:** \n\n"
-            "> **Quem te convidou pra CSI:** \n"
-            "> **Você faz parte de algum clã/comunidade? se sim diga qual:** \n"
-            "> **Qual o motivo da sua visita:** \n\n"
-            "> *Por fim, nossas cores são preto e verde, e você vai ser tratado(a) como "
-            "convidado(a) da família CSI enquanto estiver por aqui. Concorda e aceita?*\n\n"
-            "> **Sim [ ]  Não [ ]**"
-        ),
-        color=COR_VERDE,
-    )
-    e.set_footer(text="🦇 Cuidado Sedutores da Internet")
+# ══════════════════════════════════════════════════════════════════
+#  📝  FICHAS AUTOMÁTICAS (com botão "Preencher Ficha" + modal)
+# ══════════════════════════════════════════════════════════════════
+#
+# Cada ficha é descrita por um "layout": uma lista de itens que o bot usa tanto
+# pra montar o embed quanto pra montar o formulário (modal).
+#   _txt(...)     → linha fixa do embed (título, texto, linha em branco...)
+#   _campo(...)   → campo que a pessoa preenche (o valor entra depois do ":")
+#   _sim_nao(...) → pergunta Sim/Não (marca o [x] certo no embed)
+#   _QUEBRA       → força começar uma nova "parte" do formulário
+#
+# O Discord só aceita 5 campos por modal, então o formulário é dividido em partes
+# de até 5 campos, com um botão "Continuar" entre elas.
+
+_QUEBRA = {"t": "quebra"}
+
+
+def _txt(texto: str = "") -> dict:
+    return {"t": "txt", "texto": texto}
+
+
+def _campo(key, label, modal=None, bold=True, longo=False, obrigatorio=True,
+           max_len=100, placeholder="") -> dict:
+    return {
+        "t": "campo", "key": key, "label": label,
+        "modal": (modal or label)[:45],          # label do modal tem limite de 45 chars
+        "bold": bold, "longo": longo, "obr": obrigatorio,
+        "max": max_len, "ph": placeholder[:100],
+    }
+
+
+def _sim_nao(key, modal) -> dict:
+    return {"t": "simnao", "key": key, "modal": modal[:45]}
+
+
+FICHA_FOOTER = "🦇 Cuidado Sedutores da Internet"
+
+FICHAS = {
+    "recrutamento": {
+        "titulo": "Ficha de Recrutamento🦇💚",
+        "curto": "Ficha de Recrutamento",
+        "layout": [
+            _campo("discord", "User do Discord", placeholder="Ex: seunome"),
+            _campo("roblox", "User do roblox"),
+            _campo("display", "Nome de exibição do roblox"),
+            _campo("idade", "Idade", max_len=20, placeholder="Ex: 16"),
+            _campo("tempo_roblox", "Quanto tempo joga Roblox", max_len=50, placeholder="Ex: 3 anos"),
+            _campo("tempo_discord", "Quanto tempo tem sua conta do discord", max_len=50, placeholder="Ex: 2 anos"),
+            _txt(""),
+            _campo("clas", "Já Participou de outros clãs? se sim diga quais",
+                   modal="Já participou de outros clãs? Quais?", longo=True, max_len=300,
+                   placeholder="Se nunca participou, escreve: nenhum"),
+            _txt(""),
+            _txt("> *Por fim, nossas cores são preto e verde, concorda e aceita mesmo assim, "
+                 "e então se tornar um sedutor da Internet??*"),
+            _txt(""),
+            _sim_nao("concorda", "Concorda e aceita? (Sim ou Não)"),
+        ],
+    },
+    "parceria": {
+        "titulo": "Ficha de Parceria 🦇",
+        "curto": "Ficha de Parceria",
+        "layout": [
+            _campo("nome", "Nome do Clã/Comunidade"),
+            _campo("tag", "Tag do Clã/Comunidade"),
+            _campo("emote", "Emote do Clã/Comunidade"),
+            _campo("cor", "Cor principal do Clã/Comunidade"),
+            _txt("> **Imagem do Clã/Comunidade:** *(anexar na mensagem)*"),
+            _txt(""),
+            _txt("# Representantes que irão entrar no servidor"),
+            _txt(""),
+            _QUEBRA,
+            _txt("> **Representante 1:**"),
+            _campo("r1_nome", "Nome", modal="Representante 1 - Nome", bold=False),
+            _campo("r1_discord", "Discord", modal="Representante 1 - Discord", bold=False),
+            _campo("r1_cargo", "Cargo", modal="Representante 1 - Cargo", bold=False),
+            _campo("r1_roblox", "Nome de exibição no roblox",
+                   modal="Representante 1 - Nome de exibição roblox", bold=False),
+            _txt(""),
+            _QUEBRA,
+            _txt("> **Representante 2:**"),
+            _campo("r2_nome", "Nome", modal="Representante 2 - Nome", bold=False, obrigatorio=False),
+            _campo("r2_discord", "Discord", modal="Representante 2 - Discord", bold=False, obrigatorio=False),
+            _campo("r2_cargo", "Cargo", modal="Representante 2 - Cargo", bold=False, obrigatorio=False),
+            _campo("r2_roblox", "Nome de exibição no roblox",
+                   modal="Representante 2 - Nome de exibição roblox", bold=False, obrigatorio=False),
+        ],
+    },
+    "convidados": {
+        "titulo": "Ficha de Convidados 🦇🎟️",
+        "curto": "Ficha de Convidados",
+        "layout": [
+            _campo("discord", "User do Discord", placeholder="Ex: seunome"),
+            _campo("roblox", "User do roblox"),
+            _campo("display", "Nome de exibição do roblox"),
+            _campo("idade", "Idade", max_len=20, placeholder="Ex: 16"),
+            _campo("tempo_discord", "Quanto tempo tem sua conta do discord", max_len=50, placeholder="Ex: 2 anos"),
+            _txt(""),
+            _campo("convidou", "Quem te convidou pra CSI"),
+            _campo("cla", "Você faz parte de algum clã/comunidade? se sim diga qual",
+                   modal="Faz parte de algum clã/comunidade? Qual?", max_len=150,
+                   placeholder="Se não faz parte de nenhum, escreve: nenhum"),
+            _campo("motivo", "Qual o motivo da sua visita", longo=True, max_len=300),
+            _txt(""),
+            _txt("> *Por fim, nossas cores são preto e verde, e você vai ser tratado(a) como "
+                 "convidado(a) da família CSI enquanto estiver por aqui. Concorda e aceita?*"),
+            _txt(""),
+            _sim_nao("concorda", "Concorda e aceita? (Sim ou Não)"),
+        ],
+    },
+}
+
+
+def montar_embed_ficha(ficha_key: str, respostas: dict = None) -> discord.Embed:
+    """Monta o embed da ficha. Sem respostas = ficha em branco; com respostas, o valor
+    de cada campo entra logo depois do ':' (e o Sim/Não marca o [x] certo)."""
+    respostas = respostas or {}
+    spec = FICHAS[ficha_key]
+    linhas = []
+    for item in spec["layout"]:
+        t = item["t"]
+        if t == "quebra":
+            continue
+        if t == "txt":
+            linhas.append(item["texto"])
+        elif t == "campo":
+            valor = " ".join((respostas.get(item["key"]) or "").split())
+            if item["bold"]:
+                linhas.append(f"> **{item['label']}:** {valor}")
+            else:
+                linhas.append(f"> {item['label']}: {valor}")
+        elif t == "simnao":
+            r = respostas.get(item["key"]) or ""
+            sim = "x" if r == "Sim" else " "
+            nao = "x" if r == "Não" else " "
+            linhas.append(f"> **Sim [{sim}]  Não [{nao}]**")
+    e = discord.Embed(title=spec["titulo"], description="\n".join(linhas), color=COR_VERDE)
+    e.set_footer(text=FICHA_FOOTER)
     return e
+
+
+# Atalhos mantidos pra não quebrar nada que já chame essas funções
+def embed_ficha_recrutamento(respostas: dict = None) -> discord.Embed:
+    return montar_embed_ficha("recrutamento", respostas)
+
+
+def embed_ficha_parceria(respostas: dict = None) -> discord.Embed:
+    return montar_embed_ficha("parceria", respostas)
+
+
+def embed_ficha_convidados(respostas: dict = None) -> discord.Embed:
+    return montar_embed_ficha("convidados", respostas)
+
+
+def ficha_key_do_tipo(tipo: str):
+    """Descobre qual ficha pertence a esse tipo de ticket (ou None)."""
+    if tipo in TIPOS_QUE_RECEBEM_FICHA_RECRUTAMENTO:
+        return "recrutamento"
+    if tipo in TIPOS_QUE_RECEBEM_FICHA_PARCERIA:
+        return "parceria"
+    if tipo in TIPOS_QUE_RECEBEM_FICHA_CONVIDADOS:
+        return "convidados"
+    return None
+
+
+def _ficha_paginas(ficha_key: str) -> list:
+    """Divide os campos da ficha em partes de até 5 (limite do Discord por modal)."""
+    paginas, atual = [], []
+    for item in FICHAS[ficha_key]["layout"]:
+        if item["t"] == "quebra":
+            if atual:
+                paginas.append(atual)
+                atual = []
+        elif item["t"] in ("campo", "simnao"):
+            atual.append(item)
+            if len(atual) == 5:
+                paginas.append(atual)
+                atual = []
+    if atual:
+        paginas.append(atual)
+    return paginas
+
+
+class FichaModal(discord.ui.Modal):
+    """Uma parte do formulário da ficha. Ao enviar, salva as respostas e já atualiza
+    o embed da ficha lá no canal do ticket."""
+
+    def __init__(self, ficha_key: str, msg_id: int, pagina: int, salvos: dict):
+        paginas = _ficha_paginas(ficha_key)
+        self.ficha_key = ficha_key
+        self.msg_id = msg_id
+        self.pagina = pagina
+        self.total = len(paginas)
+        titulo = f"📝 {FICHAS[ficha_key]['curto']}"
+        if self.total > 1:
+            titulo += f" ({pagina + 1}/{self.total})"
+        super().__init__(title=titulo[:45])
+
+        self.itens = {}
+        self.inputs = {}
+        for item in paginas[pagina]:
+            atual = (salvos.get(item["key"]) or "")
+            if item["t"] == "simnao":
+                ti = discord.ui.TextInput(
+                    label=item["modal"], placeholder="Sim ou Não",
+                    required=True, max_length=3, default=atual or None,
+                )
+            else:
+                ti = discord.ui.TextInput(
+                    label=item["modal"],
+                    placeholder=item["ph"] or None,
+                    required=item["obr"],
+                    max_length=item["max"],
+                    style=discord.TextStyle.paragraph if item["longo"] else discord.TextStyle.short,
+                    default=atual[:item["max"]] or None,
+                )
+            self.add_item(ti)
+            self.itens[item["key"]] = item
+            self.inputs[item["key"]] = ti
+
+    async def on_submit(self, interaction: discord.Interaction):
+        guild, canal = interaction.guild, interaction.channel
+        dados = _tickets_dados(guild.id)
+        info = dados.get(str(canal.id))
+        if not info:
+            await interaction.response.send_message(embed=embed_erro("esse canal não é mais um ticket do Monstrão!!"), ephemeral=True)
+            return
+
+        respostas = dict(info.get("ficha") or {})
+        erros = []
+        for key, ti in self.inputs.items():
+            valor = " ".join(ti.value.split())
+            if self.itens[key]["t"] == "simnao":
+                v = valor.lower()
+                if v in ("sim", "s"):
+                    valor = "Sim"
+                elif v in ("não", "nao", "n"):
+                    valor = "Não"
+                else:
+                    erros.append(self.itens[key]["modal"])
+                    valor = ""
+            respostas[key] = valor
+
+        # salva (assim se a pessoa fechar o modal no meio, não perde o que já preencheu)
+        info["ficha"] = respostas
+        dados[str(canal.id)] = info
+        _tickets_salvar(guild.id, dados)
+
+        # encaixa as respostas na mensagem da ficha
+        try:
+            await canal.get_partial_message(self.msg_id).edit(embed=montar_embed_ficha(self.ficha_key, respostas))
+        except Exception:
+            pass
+
+        if erros:
+            view = FichaPaginaView(self.ficha_key, self.msg_id, self.pagina, "Corrigir")
+            await interaction.response.send_message(
+                embed=embed_erro(f"o campo **{erros[0]}** precisa ser **Sim** ou **Não**!! clica no botão pra corrigir 👹"),
+                view=view, ephemeral=True,
+            )
+        elif self.pagina + 1 < self.total:
+            view = FichaPaginaView(self.ficha_key, self.msg_id, self.pagina + 1, "Continuar")
+            await interaction.response.send_message(
+                embed=embed_ok(f"✅ Parte {self.pagina + 1}/{self.total} salva!!",
+                               "já coloquei na ficha!! clica no botão abaixo pra continuar 👹🔥"),
+                view=view, ephemeral=True,
+            )
+        else:
+            await interaction.response.send_message(
+                embed=embed_ok("📝 Ficha Preenchida!!",
+                               "tudo certo, já está na sua ficha!! agora é só aguardar que um staff da CSI "
+                               "vem finalizar seu atendimento 👹🔥\n"
+                               "*(errou algo? é só clicar em **Preencher Ficha** de novo e corrigir)*"),
+                ephemeral=True,
+            )
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        try:
+            await interaction.response.send_message(embed=embed_erro("deu ruim ao salvar a ficha!! tenta de novo 😢"), ephemeral=True)
+        except Exception:
+            pass
+
+
+class FichaPaginaView(discord.ui.View):
+    """Botão efêmero que abre a próxima parte (ou refaz a atual) do formulário."""
+
+    def __init__(self, ficha_key: str, msg_id: int, pagina: int, rotulo: str = "Continuar"):
+        super().__init__(timeout=600)
+        self.ficha_key = ficha_key
+        self.msg_id = msg_id
+        self.pagina = pagina
+        btn = discord.ui.Button(label=rotulo, emoji="📝", style=discord.ButtonStyle.blurple)
+        btn.callback = self._abrir
+        self.add_item(btn)
+
+    async def _abrir(self, interaction: discord.Interaction):
+        info = _tickets_dados(interaction.guild.id).get(str(interaction.channel.id))
+        if not info:
+            await interaction.response.send_message(embed=embed_erro("esse canal não é mais um ticket do Monstrão!!"), ephemeral=True)
+            return
+        await interaction.response.send_modal(
+            FichaModal(self.ficha_key, self.msg_id, self.pagina, info.get("ficha") or {})
+        )
+
+
+class FichaPreencherView(discord.ui.View):
+    """Botão persistente 'Preencher Ficha' que vai junto de TODAS as fichas
+    (sobrevive a restart do bot)."""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Preencher Ficha", emoji="📝", style=discord.ButtonStyle.blurple, custom_id="monstrao_ficha_preencher")
+    async def preencher(self, interaction: discord.Interaction, button: discord.ui.Button):
+        info = _tickets_dados(interaction.guild.id).get(str(interaction.channel.id))
+        if not info:
+            await interaction.response.send_message(embed=embed_erro("esse canal não é um ticket controlado pelo Monstrão!!"), ephemeral=True)
+            return
+        if interaction.user.id != info.get("owner"):
+            await interaction.response.send_message(embed=embed_erro("só quem abriu o ticket pode preencher a ficha!! 👹"), ephemeral=True)
+            return
+        ficha_key = ficha_key_do_tipo(info.get("tipo"))
+        if not ficha_key:
+            await interaction.response.send_message(embed=embed_erro("esse ticket não tem ficha pra preencher!!"), ephemeral=True)
+            return
+        await interaction.response.send_modal(
+            FichaModal(ficha_key, interaction.message.id, 0, info.get("ficha") or {})
+        )
 
 
 # ── Log detalhado de tickets ───────────────────────
@@ -2112,6 +2366,7 @@ class TicketSelect(discord.ui.Select):
                     await canal.send(
                         content=ficha_intro.format(mention=member.mention),
                         embed=ficha_embed,
+                        view=FichaPreencherView(),
                     )
                 except Exception:
                     pass
@@ -2627,6 +2882,7 @@ async def _main():
             bot.add_view(TicketPainelView(central_key, resolver_central_para_view(central_key)))
         bot.add_view(TicketFecharView())
         bot.add_view(TicketFecharReivindicarView())
+        bot.add_view(FichaPreencherView())
 
         if not TOKEN:
             print("❌ ERRO: token não encontrado! Crie um .env com MONSTRAO_TOKEN=seu_token")
