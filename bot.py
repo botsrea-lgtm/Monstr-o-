@@ -24,6 +24,7 @@ import os
 import re
 import json
 import random
+import io
 from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
@@ -77,6 +78,18 @@ DEFAULT_INVITE_LOG_CHANNEL_ID = 1554532119865200670
 # recebe o log detalhado de TODOS os eventos de ticket (abertura, reivindicação e fechamento),
 # de TODAS as centrais (suporte, recrutamento e qualquer central customizada).
 DEFAULT_TICKET_LOG_CHANNEL_ID = 1547789898919182426
+
+# Fuso usado nos horários DENTRO do arquivo de transcript (Brasília = UTC-3)
+FUSO_BR = timezone(timedelta(hours=-3))
+
+# Máximo de mensagens lidas pro transcript (proteção pra tickets gigantes)
+TRANSCRIPT_LIMITE_MENSAGENS = 5000
+
+# Se True, também manda o transcript na DM de quem abriu o ticket
+ENVIAR_TRANSCRIPT_DM_DONO = False
+
+# Guarda os tickets que já estão sendo fechados (evita clique duplo no botão)
+_TICKETS_FECHANDO: set = set()
 
 # Cargo que, ao ser concedido a um membro, dispara uma mensagem de boas-vindas
 # especial (com imagem) no canal definido logo abaixo.
@@ -1629,9 +1642,9 @@ def _contar_tickets_central(guild_id: int, central_key: str) -> int:
     return sum(1 for info in dados.values() if info.get("central") == central_key)
 
 
-async def log_ticket_evento(guild: discord.Guild, embed: discord.Embed) -> None:
-    """Manda um embed de log de ticket pro canal configurado com `m!setlogtickets`
-    (ou pro DEFAULT_TICKET_LOG_CHANNEL_ID, se nada foi configurado ainda)."""
+async def log_ticket_evento(guild: discord.Guild, embed: discord.Embed, arquivo: discord.File = None) -> None:
+    """Manda um embed (e opcionalmente um arquivo) de log de ticket pro canal configurado
+    com `m!setlogtickets` (ou pro DEFAULT_TICKET_LOG_CHANNEL_ID)."""
     cfg = get_config(guild.id)
     canal_id = cfg.get("ticket_log_channel_id") or DEFAULT_TICKET_LOG_CHANNEL_ID
     if not canal_id:
@@ -1643,9 +1656,95 @@ async def log_ticket_evento(guild: discord.Guild, embed: discord.Embed) -> None:
         except Exception:
             return
     try:
-        await canal.send(embed=embed)
+        if arquivo:
+            await canal.send(embed=embed, file=arquivo)
+        else:
+            await canal.send(embed=embed)
+    except Exception as ex:
+        print(f"[tickets] falha ao enviar log: {ex!r}")
+
+
+def _fmt_duracao_hms(segundos: float) -> str:
+    """45h 46m 13s"""
+    segundos = max(0, int(segundos))
+    h, resto = divmod(segundos, 3600)
+    m, s = divmod(resto, 60)
+    return f"{h}h {m}m {s}s"
+
+
+def _parse_iso(valor):
+    if not valor:
+        return None
+    try:
+        dt = datetime.fromisoformat(valor)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
     except Exception:
-        pass
+        return None
+
+
+async def gerar_transcript(canal: discord.TextChannel, info: dict, central: dict, fechado_por: discord.Member, fechado_em: datetime):
+    """Lê o histórico do canal e monta o .txt do transcript.
+    Devolve (bytes_do_arquivo, nome_do_arquivo, total_de_mensagens, participantes)
+    onde participantes = {user_id: {"nome", "bot", "msgs"}} (na ordem de aparição)."""
+    mensagens = [m async for m in canal.history(limit=TRANSCRIPT_LIMITE_MENSAGENS, oldest_first=True)]
+
+    participantes: dict = {}
+    corpo = []
+    for m in mensagens:
+        a = m.author
+        p = participantes.setdefault(a.id, {"nome": str(a), "bot": a.bot, "msgs": 0})
+        p["msgs"] += 1
+
+        ts = m.created_at.astimezone(FUSO_BR).strftime("%d/%m/%Y %H:%M:%S")
+        partes = []
+        if m.reference and m.reference.message_id:
+            partes.append(f"[respondendo a {m.reference.message_id}]")
+        if m.content:
+            partes.append(m.content)
+        for anexo in m.attachments:
+            partes.append(f"[anexo: {anexo.filename} -> {anexo.url}]")
+        for emb in m.embeds:
+            resumo = " | ".join(x for x in (emb.title, emb.description) if x)
+            partes.append(f"[embed: {resumo[:300]}]" if resumo else "[embed]")
+        for st in m.stickers:
+            partes.append(f"[figurinha: {st.name}]")
+        if not partes:
+            partes.append("[mensagem sem texto]")
+
+        texto = " ".join(partes).replace("\n", "\n    ")
+        editada = " (editada)" if m.edited_at else ""
+        corpo.append(f"[{ts}] {a} ({a.id}): {texto}{editada}")
+
+    # ── cabeçalho do arquivo ──
+    guild = canal.guild
+    emoji, tipo_label, _d = (central or {}).get("tipos", {}).get(info.get("tipo"), ("🎫", info.get("tipo", "—"), ""))
+    dono = guild.get_member(info.get("owner"))
+    claimed = info.get("claimed_by")
+    claimed_m = guild.get_member(claimed) if claimed else None
+    aberto_em = _parse_iso(info.get("aberto_em")) or canal.created_at
+
+    cabecalho = [
+        "=" * 64,
+        f"TRANSCRIPT — #{canal.name} ({canal.id})",
+        "=" * 64,
+        f"Central ........ {info.get('central', '?')}",
+        f"Tipo ........... {tipo_label}",
+        f"Aberto por ..... {dono or info.get('owner')} ({info.get('owner')})",
+        f"Reivindicado ... {(claimed_m or claimed) if claimed else 'ninguém'}",
+        f"Fechado por .... {fechado_por} ({fechado_por.id})",
+        f"Aberto em ...... {aberto_em.astimezone(FUSO_BR).strftime('%d/%m/%Y %H:%M:%S')}",
+        f"Fechado em ..... {fechado_em.astimezone(FUSO_BR).strftime('%d/%m/%Y %H:%M:%S')}",
+        f"Duração ........ {_fmt_duracao_hms((fechado_em - aberto_em).total_seconds())}",
+        f"Mensagens ...... {len(mensagens)}",
+        "(horários no fuso de Brasília, UTC-3)",
+        "=" * 64,
+        "",
+    ]
+
+    conteudo = "\n".join(cabecalho + corpo) + "\n"
+    return conteudo.encode("utf-8"), f"transcript-{canal.name}.txt", len(mensagens), participantes
 
 
 def _central_label(central_key: str, central: dict = None) -> str:
@@ -1695,38 +1794,137 @@ def embed_log_ticket_reivindicado(member: discord.Member, canal: discord.TextCha
     return e
 
 
-def embed_log_ticket_fechado(member: discord.Member, canal: discord.TextChannel, info: dict, central: dict = None) -> discord.Embed:
-    ts = int(datetime.now(timezone.utc).timestamp())
+def embed_log_ticket_fechado(
+    member: discord.Member,
+    canal: discord.TextChannel,
+    info: dict,
+    central: dict = None,
+    total_msgs: int = 0,
+    participantes: dict = None,
+    fechado_em: datetime = None,
+) -> discord.Embed:
+    """🎫 Relatório de Ticket Fechado — no estilo do print de referência."""
+    fechado_em = fechado_em or datetime.now(timezone.utc)
+    aberto_em = _parse_iso(info.get("aberto_em")) or canal.created_at
+    duracao = _fmt_duracao_hms((fechado_em - aberto_em).total_seconds())
 
-    duracao_txt = "desconhecida"
-    aberto_em_str = info.get("aberto_em")
-    if aberto_em_str:
-        try:
-            aberto_em = datetime.fromisoformat(aberto_em_str)
-            duracao_txt = _fmt_duracao((datetime.now(timezone.utc) - aberto_em).total_seconds())
-        except Exception:
-            pass
+    central_key = info.get("central", "?")
+    emoji, tipo_label, _d = (central or {}).get("tipos", {}).get(info.get("tipo"), ("🎫", info.get("tipo", "—"), ""))
+    claimed = info.get("claimed_by")
 
     e = discord.Embed(
-        title="🔒 Ticket Fechado",
+        title="🎫 Relatório de Ticket Fechado",
         color=COR_ERRO,
-        timestamp=datetime.now(timezone.utc),
+        timestamp=fechado_em,
     )
-    e.set_author(name=f"{member} • fechou o ticket", icon_url=member.display_avatar.url)
-    e.add_field(name="🔒 Fechado por", value=f"{member.mention}\n`{member.id}`", inline=True)
-    e.add_field(name="👤 Dono do Ticket", value=f"<@{info.get('owner')}>", inline=True)
+    # linha 1
+    e.add_field(name="Tipo", value=f"{emoji} {tipo_label}", inline=True)
+    e.add_field(name="Canal", value=f"`#{canal.name}`", inline=True)
+    e.add_field(name="ID do canal", value=f"`{canal.id}`", inline=True)
+    # linha 2
+    e.add_field(name="Aberto por", value=f"<@{info.get('owner')}>", inline=True)
+    e.add_field(name="Fechado por", value=member.mention, inline=True)
+    e.add_field(name="Reivindicado por", value=f"<@{claimed}>" if claimed else "*ninguém*", inline=True)
+    # linha 3
+    e.add_field(name="Aberto em", value=f"<t:{int(aberto_em.timestamp())}:F>", inline=True)
+    e.add_field(name="Fechado em", value=f"<t:{int(fechado_em.timestamp())}:F>", inline=True)
+    e.add_field(name="Duração", value=duracao, inline=True)
+    # linha 4
+    e.add_field(name="Central", value=_central_label(central_key, central), inline=True)
+    e.add_field(name="Total de mensagens", value=str(total_msgs), inline=True)
+    e.add_field(name="Nº nessa central", value=f"`{_contar_tickets_central(canal.guild.id, central_key)}º` ticket", inline=True)
 
-    claimed_by = info.get("claimed_by")
-    e.add_field(name="🙋 Reivindicado por", value=f"<@{claimed_by}>" if claimed_by else "*ninguém reivindicou*", inline=True)
+    # participantes (ordenados por quem mais falou)
+    if participantes:
+        linhas = []
+        for uid, p in sorted(participantes.items(), key=lambda kv: -kv[1]["msgs"]):
+            nome = discord.utils.escape_markdown(p["nome"])
+            tag = " 🤖" if p["bot"] else ""
+            linhas.append(f"• {nome}{tag} (`{uid}`) — {p['msgs']} msg")
+        total_part = len(linhas)
+        while len("\n".join(linhas)) > 1000 and len(linhas) > 1:
+            linhas.pop()
+        if len(linhas) < total_part:
+            linhas.append(f"• ...e mais {total_part - len(linhas)}")
+        e.add_field(name=f"Participantes ({total_part})", value="\n".join(linhas), inline=False)
 
-    e.add_field(name="📁 Central", value=_central_label(info.get("central", "?"), central), inline=True)
-    e.add_field(name="🏷️ Tipo", value=f"`{info.get('tipo', '—')}`", inline=True)
-    e.add_field(name="⏱️ Tempo Aberto", value=duracao_txt, inline=True)
-    e.add_field(name="💬 Canal", value=f"`#{canal.name}`\n`{canal.id}`", inline=True)
-    e.add_field(name="🕒 Fechado em", value=f"<t:{ts}:F>\n<t:{ts}:R>", inline=True)
-    e.set_thumbnail(url=member.display_avatar.url)
-    e.set_footer(text=f"👹 Monstrão • Log de Tickets • ID do canal: {canal.id}")
+    e.set_footer(text="👹 Monstrão • Log de Tickets")
     return e
+
+
+async def fechar_ticket_comum(interaction: discord.Interaction, central_padrao: str):
+    """Lógica ÚNICA de fechamento, usada pelos dois botões de fechar.
+    Gera o transcript ANTES de apagar o canal, manda o log e só depois deleta."""
+    canal = interaction.channel
+    guild = interaction.guild
+    dados = _tickets_dados(guild.id)
+    info = dados.get(str(canal.id))
+    if not info:
+        await interaction.response.send_message(embed=embed_erro("esse canal não é um ticket controlado pelo Monstrão!!"), ephemeral=True)
+        return
+
+    eh_dono = interaction.user.id == info["owner"]
+    eh_staff = interaction.user.guild_permissions.manage_channels
+    if not (eh_dono or eh_staff):
+        await interaction.response.send_message(embed=embed_erro("só quem abriu o ticket ou a staff pode fechar!! 👹"), ephemeral=True)
+        return
+
+    if canal.id in _TICKETS_FECHANDO:
+        await interaction.response.send_message(embed=embed_erro("esse ticket já está sendo fechado!! 👹"), ephemeral=True)
+        return
+    _TICKETS_FECHANDO.add(canal.id)
+
+    await interaction.response.send_message(embed=embed_ok(
+        "🔒 Ticket Fechado!!", "tô salvando o transcript e esse canal vai sumir já já!! valeu por passar na CSI!! 👹🔥"
+    ))
+
+    fechado_em = datetime.now(timezone.utc)
+    info["aberto"] = False
+    info["fechado_por"] = interaction.user.id
+    info["fechado_em"] = fechado_em.isoformat()
+    dados[str(canal.id)] = info
+    _tickets_salvar(guild.id, dados)
+
+    # 📋 transcript + relatório
+    central = get_central(guild.id, info.get("central", central_padrao))
+    conteudo = nome_arquivo = None
+    total_msgs, participantes = 0, {}
+    try:
+        conteudo, nome_arquivo, total_msgs, participantes = await gerar_transcript(
+            canal, info, central, interaction.user, fechado_em
+        )
+    except Exception as ex:
+        print(f"[tickets] falha ao gerar transcript de #{canal.name}: {ex!r}")
+
+    try:
+        arquivo = discord.File(io.BytesIO(conteudo), filename=nome_arquivo) if conteudo else None
+        await log_ticket_evento(
+            guild,
+            embed_log_ticket_fechado(interaction.user, canal, info, central, total_msgs, participantes, fechado_em),
+            arquivo,
+        )
+    except Exception as ex:
+        print(f"[tickets] falha ao logar fechamento: {ex!r}")
+
+    # 📩 (opcional) cópia do transcript na DM de quem abriu
+    if ENVIAR_TRANSCRIPT_DM_DONO and conteudo:
+        dono = guild.get_member(info["owner"])
+        if dono:
+            try:
+                await dono.send(
+                    content=f"📄 aqui está o transcript do seu ticket **#{canal.name}** na CSI!! 👹",
+                    file=discord.File(io.BytesIO(conteudo), filename=nome_arquivo),
+                )
+            except Exception:
+                pass  # DM fechada
+
+    await asyncio.sleep(3)
+    try:
+        await canal.delete(reason=f"Ticket fechado por {interaction.user}")
+    except Exception:
+        pass
+    finally:
+        _TICKETS_FECHANDO.discard(canal.id)
 
 
 class TicketFecharView(discord.ui.View):
@@ -1737,37 +1935,7 @@ class TicketFecharView(discord.ui.View):
 
     @discord.ui.button(label="Fechar Ticket", emoji="🔒", style=discord.ButtonStyle.red, custom_id="monstrao_ticket_fechar")
     async def fechar(self, interaction: discord.Interaction, button: discord.ui.Button):
-        canal = interaction.channel
-        dados = _tickets_dados(interaction.guild.id)
-        info = dados.get(str(canal.id))
-        if not info:
-            await interaction.response.send_message(embed=embed_erro("esse canal não é um ticket controlado pelo Monstrão!!"), ephemeral=True)
-            return
-        eh_dono = interaction.user.id == info["owner"]
-        eh_staff = interaction.user.guild_permissions.manage_channels
-        if not (eh_dono or eh_staff):
-            await interaction.response.send_message(embed=embed_erro("só quem abriu o ticket ou a staff pode fechar!! 👹"), ephemeral=True)
-            return
-
-        await interaction.response.send_message(embed=embed_ok("🔒 Ticket Fechado!!", "esse canal vai sumir em 5 segundinhos!! valeu por passar na CSI!! 👹🔥"))
-        info["aberto"] = False
-        info["fechado_por"] = interaction.user.id
-        info["fechado_em"] = datetime.now(timezone.utc).isoformat()
-        dados[str(canal.id)] = info
-        _tickets_salvar(interaction.guild.id, dados)
-
-        # 📋 Log detalhado do fechamento
-        try:
-            central = get_central(interaction.guild.id, info.get("central", "suporte"))
-            await log_ticket_evento(interaction.guild, embed_log_ticket_fechado(interaction.user, canal, info, central))
-        except Exception:
-            pass
-
-        await asyncio.sleep(5)
-        try:
-            await canal.delete(reason=f"Ticket fechado por {interaction.user}")
-        except Exception:
-            pass
+        await fechar_ticket_comum(interaction, "suporte")
 
 
 class TicketFecharReivindicarView(discord.ui.View):
@@ -1779,37 +1947,7 @@ class TicketFecharReivindicarView(discord.ui.View):
 
     @discord.ui.button(label="Fechar Ticket", emoji="🔒", style=discord.ButtonStyle.red, custom_id="monstrao_ticket_fechar")
     async def fechar(self, interaction: discord.Interaction, button: discord.ui.Button):
-        canal = interaction.channel
-        dados = _tickets_dados(interaction.guild.id)
-        info = dados.get(str(canal.id))
-        if not info:
-            await interaction.response.send_message(embed=embed_erro("esse canal não é um ticket controlado pelo Monstrão!!"), ephemeral=True)
-            return
-        eh_dono = interaction.user.id == info["owner"]
-        eh_staff = interaction.user.guild_permissions.manage_channels
-        if not (eh_dono or eh_staff):
-            await interaction.response.send_message(embed=embed_erro("só quem abriu o ticket ou a staff pode fechar!! 👹"), ephemeral=True)
-            return
-
-        await interaction.response.send_message(embed=embed_ok("🔒 Ticket Fechado!!", "esse canal vai sumir em 5 segundinhos!! valeu por passar na CSI!! 👹🔥"))
-        info["aberto"] = False
-        info["fechado_por"] = interaction.user.id
-        info["fechado_em"] = datetime.now(timezone.utc).isoformat()
-        dados[str(canal.id)] = info
-        _tickets_salvar(interaction.guild.id, dados)
-
-        # 📋 Log detalhado do fechamento
-        try:
-            central = get_central(interaction.guild.id, info.get("central", "recrutamento"))
-            await log_ticket_evento(interaction.guild, embed_log_ticket_fechado(interaction.user, canal, info, central))
-        except Exception:
-            pass
-
-        await asyncio.sleep(5)
-        try:
-            await canal.delete(reason=f"Ticket fechado por {interaction.user}")
-        except Exception:
-            pass
+        await fechar_ticket_comum(interaction, "recrutamento")
 
     @discord.ui.button(label="Reivindicar", emoji="🙋", style=discord.ButtonStyle.green, custom_id="monstrao_ticket_reivindicar")
     async def reivindicar(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1902,7 +2040,8 @@ class TicketSelect(discord.ui.Select):
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
             member: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, attach_files=True),
-            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True),
+            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True,
+                                                  read_message_history=True, attach_files=True, embed_links=True),
         }
         if cargo:
             overwrites[cargo] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
