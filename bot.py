@@ -55,6 +55,11 @@ VOZ_TEMPO_FILE   = os.path.join(DATA_DIR, "monstrao_voz_tempo.json")  # tempo to
 RANKING_CALL_TOP        = 10    # quantos membros aparecem no ranking
 RANKING_CALL_APAGAR_EM  = 300   # segundos até apagar a mensagem do ranking (5 minutos)
 
+# Ranking FIXO (ao vivo): uma mensagem que fica sempre no canal abaixo e é editada a cada minuto.
+# Diferente do comando, ela nunca é apagada. Pode ser trocado com m!setrankingcall #canal
+DEFAULT_RANKING_CALL_CHANNEL_ID = 1559420312552996915
+RANKING_FIXO_TOP                = 25    # quantos membros aparecem no ranking fixo
+
 VM_LOBBY_NAME    = "🔜 cria sua call, guerreiro(a)"
 VM_DEFAULT_LIMIT = 0     # 0 = sem limite
 VM_EMPTY_DELAY   = 5     # segundos antes de deletar call vazia
@@ -199,8 +204,14 @@ def _load(path: str, default):
 
 
 def _save(path: str, data) -> None:
-    with open(path, "w", encoding="utf-8") as f:
+    # Escrita atômica: grava num arquivo temporário e troca no final. Assim, se o bot cair
+    # no meio do salvamento, o arquivo antigo continua íntegro (nada de JSON cortado/zerado).
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
 
 
 def get_config(guild_id: int) -> dict:
@@ -902,6 +913,7 @@ class ConfigCog(commands.Cog, name="MonstraoConfig"):
         embed.add_field(name="🤝 Parcerias", value=fmt("parceria_channel_id"), inline=True)
         embed.add_field(name="🎙️ Lobby VM", value=fmt("vm_lobby_id"), inline=True)
         embed.add_field(name="🎫 Log de Tickets", value=fmt("ticket_log_channel_id", DEFAULT_TICKET_LOG_CHANNEL_ID), inline=True)
+        embed.add_field(name="🏆 Ranking de Call", value=fmt("ranking_call_channel_id", DEFAULT_RANKING_CALL_CHANNEL_ID), inline=True)
         await ctx.send(embed=embed)
 
 
@@ -929,10 +941,17 @@ class CallRankingCog(commands.Cog, name="MonstraoCallRanking"):
         # (guild_id, user_id) -> timestamp (epoch) de quando começamos a contar o tempo atual
         self.entrada: dict[tuple[int, int], float] = {}
         self._seeded = False
+        self._canais_invalidos: set = set()   # (guild_id, channel_id) que não deu pra acessar
+        self._lock_ranking = asyncio.Lock()
         self.salvar_tempo_periodico.start()
 
     def cog_unload(self):
         self.salvar_tempo_periodico.cancel()
+        # ao desligar o bot, grava o que estava em andamento (não perde nem o último minuto)
+        try:
+            self._flush_sessoes()
+        except Exception as ex:
+            print(f"[ranking call] falha ao salvar no desligamento: {ex!r}")
 
     @staticmethod
     def _agora() -> float:
@@ -980,10 +999,9 @@ class CallRankingCog(commands.Cog, name="MonstraoCallRanking"):
         elif before.channel and after.channel:
             self.entrada.setdefault(chave, agora)
 
-    @tasks.loop(seconds=60)
-    async def salvar_tempo_periodico(self):
-        """A cada minuto salva o tempo acumulado de quem ainda está em call.
-        Assim, se o bot reiniciar, no máximo 1 minuto é perdido."""
+    def _flush_sessoes(self):
+        """Soma no /data o tempo acumulado de quem está em call agora e reinicia
+        a contagem da sessão (assim nada é contado duas vezes)."""
         if not self.entrada:
             return
         agora = self._agora()
@@ -993,6 +1011,22 @@ class CallRankingCog(commands.Cog, name="MonstraoCallRanking"):
             g[str(uid)] = g.get(str(uid), 0) + max(0, agora - inicio)
             self.entrada[(gid, uid)] = agora
         _save(VOZ_TEMPO_FILE, todos)
+
+    @tasks.loop(seconds=60)
+    async def salvar_tempo_periodico(self):
+        """A cada minuto: (1) salva o tempo acumulado de quem ainda está em call
+        (se o bot reiniciar, no máximo 1 minuto é perdido) e (2) atualiza o
+        ranking fixo no canal."""
+        try:
+            self._flush_sessoes()
+        except Exception as ex:
+            print(f"[ranking call] falha ao salvar tempo: {ex!r}")
+
+        for guild in list(self.bot.guilds):
+            try:
+                await self._atualizar_ranking_fixo(guild)
+            except Exception as ex:
+                print(f"[ranking call] falha ao atualizar ranking fixo em {guild.id}: {ex!r}")
 
     @salvar_tempo_periodico.before_loop
     async def before_salvar(self):
@@ -1053,6 +1087,105 @@ class CallRankingCog(commands.Cog, name="MonstraoCallRanking"):
                 await msg_comando.delete(delay=RANKING_CALL_APAGAR_EM)
             except Exception:
                 pass
+
+    # ── Ranking FIXO (mensagem ao vivo, editada a cada minuto) ──
+
+    async def _canal_ranking_fixo(self, guild: discord.Guild):
+        cid = get_config(guild.id).get("ranking_call_channel_id") or DEFAULT_RANKING_CALL_CHANNEL_ID
+        canal = guild.get_channel(cid)
+        if canal is None and (guild.id, cid) not in self._canais_invalidos:
+            try:
+                canal = await guild.fetch_channel(cid)
+            except (discord.NotFound, discord.Forbidden):
+                # canal não existe nesse servidor (ou sem acesso) -> não tenta de novo todo minuto
+                self._canais_invalidos.add((guild.id, cid))
+                canal = None
+            except Exception:
+                canal = None   # falha momentânea de rede: tenta de novo no próximo ciclo
+        return canal
+
+    def _embed_ranking_fixo(self, guild: discord.Guild) -> discord.Embed:
+        ranking = self._montar_ranking(guild)
+        agora = datetime.now(timezone.utc)
+        em_call = sum(1 for (gid, _u) in self.entrada if gid == guild.id)
+
+        if not ranking:
+            desc = "ninguém acumulou tempo em call ainda!! entra numa call aí, guerreiro(a)!! 🎙️👹"
+        else:
+            medalhas = ["🥇", "🥈", "🥉"]
+            linhas = []
+            for i, (uid, seg) in enumerate(ranking[:RANKING_FIXO_TOP]):
+                pos = medalhas[i] if i < 3 else f"**{i + 1}º**"
+                marca = " 🔊" if (guild.id, uid) in self.entrada else ""
+                linhas.append(f"{pos} <@{uid}> — `{_fmt_tempo_call(seg)}`{marca}")
+            desc = "\n".join(linhas)
+
+        e = discord.Embed(
+            title="🏆 Ranking de Tempo em Call — Ao Vivo",
+            description=desc,
+            color=COR_DOURADO,
+            timestamp=agora,
+        )
+        e.add_field(name="🔊 Em call agora", value=f"`{em_call}`", inline=True)
+        e.add_field(name="👥 No ranking", value=f"`{len(ranking)}`", inline=True)
+        e.add_field(name="🔄 Atualizado", value=f"<t:{int(agora.timestamp())}:R>", inline=True)
+        e.set_footer(text="👹 Monstrão • atualiza a cada 1 minuto • 🔊 = está em call agora")
+        return e
+
+    async def _atualizar_ranking_fixo(self, guild: discord.Guild):
+        """Edita a mensagem fixa do ranking (ou cria, se ainda não existir / foi apagada).
+        O id da mensagem fica salvo no /data, então depois de reiniciar o bot continua
+        editando a MESMA mensagem em vez de mandar outra."""
+        async with self._lock_ranking:
+            canal = await self._canal_ranking_fixo(guild)
+            if not canal:
+                return None
+
+            embed = self._embed_ranking_fixo(guild)
+            cfg = get_config(guild.id)
+            msg_id = cfg.get("ranking_call_message_id")
+            msg_canal = cfg.get("ranking_call_message_channel_id")
+
+            if msg_id and msg_canal == canal.id:
+                try:
+                    await canal.get_partial_message(msg_id).edit(embed=embed)
+                    return msg_id
+                except discord.NotFound:
+                    pass   # alguém apagou a mensagem -> cria uma nova logo abaixo
+                except Exception as ex:
+                    print(f"[ranking call] não consegui editar o ranking fixo: {ex!r}")
+                    return None
+
+            try:
+                msg = await canal.send(embed=embed)
+            except Exception as ex:
+                print(f"[ranking call] não consegui postar o ranking fixo em #{canal}: {ex!r}")
+                return None
+            set_config_value(guild.id, "ranking_call_message_id", msg.id)
+            set_config_value(guild.id, "ranking_call_message_channel_id", canal.id)
+            return msg.id
+
+    @commands.command(name="setrankingcall")
+    @commands.has_permissions(manage_guild=True)
+    async def set_ranking_call(self, ctx: commands.Context, canal: discord.TextChannel):
+        """Troca o canal do ranking fixo (apaga o antigo e já posta um novo)."""
+        cfg = get_config(ctx.guild.id)
+        antigo_msg = cfg.get("ranking_call_message_id")
+        antigo_canal = ctx.guild.get_channel(cfg.get("ranking_call_message_channel_id") or 0)
+        if antigo_msg and antigo_canal:
+            try:
+                await antigo_canal.get_partial_message(antigo_msg).delete()
+            except Exception:
+                pass
+        set_config_value(ctx.guild.id, "ranking_call_channel_id", canal.id)
+        set_config_value(ctx.guild.id, "ranking_call_message_id", None)
+        set_config_value(ctx.guild.id, "ranking_call_message_channel_id", None)
+        self._canais_invalidos.discard((ctx.guild.id, canal.id))
+
+        if await self._atualizar_ranking_fixo(ctx.guild):
+            await ctx.send(embed=embed_ok("✅ Ranking Fixo Definido!!", f"o ranking ao vivo agora fica em {canal.mention} e atualiza a cada minuto!! 🏆👹"))
+        else:
+            await ctx.send(embed=embed_erro(f"salvei o canal, mas não consegui postar em {canal.mention}!! confere se eu tenho permissão de ver/mandar mensagem/embed lá 😢"))
 
     @commands.command(name="vercallmembros", aliases=["rankcall", "rankingcall"])
     @commands.guild_only()
@@ -3053,7 +3186,9 @@ async def monstrao_help(ctx: commands.Context):
     ))
     embed.add_field(name="🏆 Ranking de Call", inline=False, value=(
         "`.vercallmembros` (ou `m!vercallmembros`) — top de quem mais ficou em call "
-        "*(a mensagem some sozinha em 5 minutos)*"
+        "*(a mensagem some sozinha em 5 minutos)*\n"
+        "`m!setrankingcall #canal` — troca o canal do **ranking fixo ao vivo**, que fica sempre no ar "
+        "e se atualiza sozinho a cada minuto"
     ))
     embed.add_field(name="⚙️ Configuração", inline=False, value=(
         "`m!setlogvoz #canal` · `m!setlogchat #canal`\n"
