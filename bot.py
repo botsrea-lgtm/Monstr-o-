@@ -49,6 +49,11 @@ ANIVERSARIO_FILE = os.path.join(DATA_DIR, "monstrao_aniversarios.json")
 TICKETS_FILE     = os.path.join(DATA_DIR, "monstrao_tickets.json")
 CENTRAIS_CUSTOM_FILE = os.path.join(DATA_DIR, "monstrao_centrais_custom.json")
 CONVITES_FILE    = os.path.join(DATA_DIR, "monstrao_convites.json")   # contagem de convites (persistente)
+VOZ_TEMPO_FILE   = os.path.join(DATA_DIR, "monstrao_voz_tempo.json")  # tempo total em call por membro (persistente)
+
+# Ranking de tempo em call (.vercallmembros / m!vercallmembros)
+RANKING_CALL_TOP        = 10    # quantos membros aparecem no ranking
+RANKING_CALL_APAGAR_EM  = 300   # segundos até apagar a mensagem do ranking (5 minutos)
 
 VM_LOBBY_NAME    = "🔜 cria sua call, guerreiro(a)"
 VM_DEFAULT_LIMIT = 0     # 0 = sem limite
@@ -898,6 +903,170 @@ class ConfigCog(commands.Cog, name="MonstraoConfig"):
         embed.add_field(name="🎙️ Lobby VM", value=fmt("vm_lobby_id"), inline=True)
         embed.add_field(name="🎫 Log de Tickets", value=fmt("ticket_log_channel_id", DEFAULT_TICKET_LOG_CHANNEL_ID), inline=True)
         await ctx.send(embed=embed)
+
+
+# ══════════════════════════════════════════════════════════════════
+#  🏆  RANKING DE TEMPO EM CALL
+# ══════════════════════════════════════════════════════════════════
+
+def _fmt_tempo_call(segundos: float) -> str:
+    """Formata segundos como '12h 05min' (ou '5min 30s' pra tempos curtos)."""
+    segundos = max(0, int(segundos))
+    h, resto = divmod(segundos, 3600)
+    m, s = divmod(resto, 60)
+    if h:
+        return f"{h}h {m:02d}min"
+    if m:
+        return f"{m}min {s:02d}s"
+    return f"{s}s"
+
+
+class CallRankingCog(commands.Cog, name="MonstraoCallRanking"):
+    """👹 Conta o tempo que cada membro passa em call e monta o ranking."""
+
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+        # (guild_id, user_id) -> timestamp (epoch) de quando começamos a contar o tempo atual
+        self.entrada: dict[tuple[int, int], float] = {}
+        self._seeded = False
+        self.salvar_tempo_periodico.start()
+
+    def cog_unload(self):
+        self.salvar_tempo_periodico.cancel()
+
+    @staticmethod
+    def _agora() -> float:
+        return datetime.now(timezone.utc).timestamp()
+
+    # ── Contagem ──────────────────────────────────
+
+    def _semear_quem_ja_esta_em_call(self):
+        """Quando o bot liga, começa a contar quem já estava em call."""
+        agora = self._agora()
+        for guild in self.bot.guilds:
+            for vc in guild.voice_channels:
+                for m in vc.members:
+                    if not m.bot:
+                        self.entrada.setdefault((guild.id, m.id), agora)
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        if self._seeded:
+            return
+        self._seeded = True
+        self._semear_quem_ja_esta_em_call()
+
+    @commands.Cog.listener()
+    async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+        if member.bot:
+            return
+        chave = (member.guild.id, member.id)
+        agora = self._agora()
+
+        # entrou em call (estava fora de qualquer call)
+        if after.channel and not before.channel:
+            self.entrada[chave] = agora
+
+        # saiu de call -> fecha a sessão e soma no total
+        elif before.channel and not after.channel:
+            inicio = self.entrada.pop(chave, None)
+            if inicio is not None:
+                todos = _load(VOZ_TEMPO_FILE, {})
+                g = todos.setdefault(str(member.guild.id), {})
+                g[str(member.id)] = g.get(str(member.id), 0) + max(0, agora - inicio)
+                _save(VOZ_TEMPO_FILE, todos)
+
+        # trocou de call (continua contando, nada a fazer) — mas garante que existe sessão
+        elif before.channel and after.channel:
+            self.entrada.setdefault(chave, agora)
+
+    @tasks.loop(seconds=60)
+    async def salvar_tempo_periodico(self):
+        """A cada minuto salva o tempo acumulado de quem ainda está em call.
+        Assim, se o bot reiniciar, no máximo 1 minuto é perdido."""
+        if not self.entrada:
+            return
+        agora = self._agora()
+        todos = _load(VOZ_TEMPO_FILE, {})
+        for (gid, uid), inicio in list(self.entrada.items()):
+            g = todos.setdefault(str(gid), {})
+            g[str(uid)] = g.get(str(uid), 0) + max(0, agora - inicio)
+            self.entrada[(gid, uid)] = agora
+        _save(VOZ_TEMPO_FILE, todos)
+
+    @salvar_tempo_periodico.before_loop
+    async def before_salvar(self):
+        await self.bot.wait_until_ready()
+        if not self._seeded:
+            self._seeded = True
+            self._semear_quem_ja_esta_em_call()
+
+    # ── Ranking ───────────────────────────────────
+
+    def _montar_ranking(self, guild: discord.Guild) -> list:
+        """Lista [(user_id, segundos)] em ordem decrescente, já somando o tempo
+        da sessão em andamento (de quem está em call agora)."""
+        agora = self._agora()
+        totais = {int(uid): float(seg) for uid, seg in _load(VOZ_TEMPO_FILE, {}).get(str(guild.id), {}).items()}
+        for (gid, uid), inicio in self.entrada.items():
+            if gid == guild.id:
+                totais[uid] = totais.get(uid, 0) + max(0, agora - inicio)
+        ranking = [(uid, seg) for uid, seg in totais.items() if seg >= 1]
+        ranking.sort(key=lambda x: -x[1])
+        return ranking
+
+    async def _enviar_ranking(self, canal: discord.abc.Messageable, autor: discord.Member, msg_comando: discord.Message = None):
+        guild = autor.guild
+        ranking = self._montar_ranking(guild)
+
+        if not ranking:
+            e = embed_info("🏆 Ranking de Call", "ninguém acumulou tempo em call ainda!! entra numa call aí, guerreiro(a)!! 🎙️👹", cor=COR_DOURADO)
+        else:
+            medalhas = ["🥇", "🥈", "🥉"]
+            linhas = []
+            for i, (uid, seg) in enumerate(ranking[:RANKING_CALL_TOP]):
+                pos = medalhas[i] if i < 3 else f"**{i + 1}º**"
+                em_call = " 🔊" if (guild.id, uid) in self.entrada else ""
+                linhas.append(f"{pos} <@{uid}> — `{_fmt_tempo_call(seg)}`{em_call}")
+
+            e = embed_info(
+                f"🏆 Ranking de Tempo em Call — {guild.name}",
+                "\n".join(linhas),
+                cor=COR_DOURADO,
+            )
+
+            # posição de quem pediu (se não estiver no top)
+            pos_autor = next((i for i, (uid, _s) in enumerate(ranking) if uid == autor.id), None)
+            if pos_autor is not None and pos_autor >= RANKING_CALL_TOP:
+                e.add_field(
+                    name="📍 Sua posição",
+                    value=f"{autor.mention} está em **{pos_autor + 1}º** com `{_fmt_tempo_call(ranking[pos_autor][1])}`",
+                    inline=False,
+                )
+            e.add_field(name="ℹ️", value="🔊 = está em call agora • essa mensagem some em 5 minutos!!", inline=False)
+
+        await canal.send(embed=e, delete_after=RANKING_CALL_APAGAR_EM)
+
+        # apaga também a mensagem do comando junto com o ranking (se tiver permissão)
+        if msg_comando is not None:
+            try:
+                await msg_comando.delete(delay=RANKING_CALL_APAGAR_EM)
+            except Exception:
+                pass
+
+    @commands.command(name="vercallmembros", aliases=["rankcall", "rankingcall"])
+    @commands.guild_only()
+    async def ver_call_membros(self, ctx: commands.Context):
+        await self._enviar_ranking(ctx.channel, ctx.author, ctx.message)
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        """Também responde ao formato com ponto: .vercallmembros"""
+        if message.author.bot or not message.guild:
+            return
+        partes = message.content.strip().lower().split()
+        if partes and partes[0] == ".vercallmembros":
+            await self._enviar_ranking(message.channel, message.author, message)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -2882,6 +3051,10 @@ async def monstrao_help(ctx: commands.Context):
         "`m!vm info` — status do sistema\n"
         "*(use os botões do painel pra gerenciar sua call)*"
     ))
+    embed.add_field(name="🏆 Ranking de Call", inline=False, value=(
+        "`.vercallmembros` (ou `m!vercallmembros`) — top de quem mais ficou em call "
+        "*(a mensagem some sozinha em 5 minutos)*"
+    ))
     embed.add_field(name="⚙️ Configuração", inline=False, value=(
         "`m!setlogvoz #canal` · `m!setlogchat #canal`\n"
         "`m!setwelcome #canal` · `m!setconvites #canal`\n"
@@ -2962,6 +3135,7 @@ async def _main():
         await bot.add_cog(VoiceMasterCog(bot))
         await bot.add_cog(ConfigCog(bot))
         await bot.add_cog(LogCog(bot))
+        await bot.add_cog(CallRankingCog(bot))
         await bot.add_cog(WelcomeCog(bot))
         await bot.add_cog(DialogueCog(bot))
         await bot.add_cog(BirthdayCog(bot))
