@@ -123,12 +123,14 @@ CANAL_PARCERIA_ID = 1499002824627847299
 IMAGEM_PARCERIA_URL = "https://cdn.discordapp.com/attachments/926913851172204577/1549443648444309584/ChatGPT_Image_15_de_set._de_2026_12_35_40.png?ex=6aaab759&is=6aa965d9&hm=3b2b98ff2fcde5f71857d4630f34aa955124df623da1ded84a2219d6ea7d06d0"
 
 # Cargos que sempre podem ver e reivindicar os tickets da central de Recrutamento
-# (independente de qual cargo estiver configurado com m!setcargoticket recrutamento @cargo)
+# (independente de qual cargo estiver configurado com m!setcargoticket recrutamento @cargo).
+# Todos eles também são MARCADOS (mencionados) quando um ticket de recrutamento é aberto.
 RECRUTAMENTO_STAFF_ROLE_IDS = [
     1499002605194706995,
     1547958453530525747,
     1547958619268714569,
     1547958651459870741,
+    1499002606658523196,
 ]
 
 # ══════════════════════════════════════════════════════════════════
@@ -2638,10 +2640,26 @@ class TicketSelect(discord.ui.Select):
             f"{emoji} Ticket de {label}",
             f"e aí, {member.mention}!! a equipe da CSI já foi avisada!! explica com calma o que precisa que a gente resolve isso rapidinho!! 👹🔥"
         )
-        mencao_cargo = cargo.mention if cargo else ""
+
+        # 🔔 Marca (menciona) o cargo configurado + todos os cargos fixos de recrutamento
+        mencoes = []
+        if cargo:
+            mencoes.append(cargo.mention)
+        if eh_recrutamento:
+            for role_id in RECRUTAMENTO_STAFF_ROLE_IDS:
+                role = guild.get_role(role_id)
+                if role and role.mention not in mencoes:
+                    mencoes.append(role.mention)
+        mencao_cargo = " ".join(mencoes)
+
         view_ticket = TicketFecharReivindicarView() if eh_recrutamento else TicketFecharView()
         try:
-            await canal.send(content=f"{member.mention} {mencao_cargo}".strip(), embed=embed, view=view_ticket)
+            await canal.send(
+                content=f"{member.mention} {mencao_cargo}".strip(),
+                embed=embed,
+                view=view_ticket,
+                allowed_mentions=discord.AllowedMentions(users=True, roles=True),
+            )
         except Exception:
             pass
 
@@ -3226,7 +3244,7 @@ async def monstrao_help(ctx: commands.Context):
         "`m!setlogtickets #canal` — canal que recebe o log detalhado de TODOS os tickets\n"
         "*(recrutamento manda a Ficha de Recrutamento automaticamente 10s depois de abrir, "
         "a opção Parceria manda a Ficha de Parceria, a opção Convidados manda a Ficha de Convidados, "
-        "e os cargos fixos configurados podem ver e reivindicar esses tickets)*"
+        "e os cargos fixos configurados podem ver, ser marcados e reivindicar esses tickets)*"
     ))
     embed.add_field(name="🆕 Tickets — Crie Suas Próprias Centrais!!", inline=False, value=(
         "`m!novacentral <chave> <Título> | <intro>` — cria uma central nova do zero\n"
