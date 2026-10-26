@@ -51,6 +51,17 @@ CENTRAIS_CUSTOM_FILE = os.path.join(DATA_DIR, "monstrao_centrais_custom.json")
 CONVITES_FILE    = os.path.join(DATA_DIR, "monstrao_convites.json")   # contagem de convites (persistente)
 VOZ_TEMPO_FILE   = os.path.join(DATA_DIR, "monstrao_voz_tempo.json")  # tempo total em call por membro (persistente)
 
+# Calls privadas monitoradas (m!privado / m!privadotodos)
+PRIVADO_FILE = os.path.join(DATA_DIR, "monstrao_privado.json")   # tempo em calls privadas (persistente)
+
+# IDs das calls consideradas "privadas" (só elas são monitoradas)
+CALLS_PRIVADAS_IDS = {
+    1560081261966397450,
+    1560082101527773184,
+    1499002771108790272,
+    1499002769586131054,
+}
+
 # Ranking de tempo em call (.vercallmembros / m!vercallmembros)
 RANKING_CALL_TOP        = 10    # quantos membros aparecem no ranking
 RANKING_CALL_APAGAR_EM  = 300   # segundos até apagar a mensagem do ranking (5 minutos)
@@ -3185,6 +3196,289 @@ async def investigar(ctx: commands.Context, *, ids: str = ""):
 
 
 # ══════════════════════════════════════════════════════════════════
+#  🕵️  CALLS PRIVADAS — quem fica, quanto tempo e em qual call
+# ══════════════════════════════════════════════════════════════════
+
+class PrivadoCog(commands.Cog, name="MonstraoPrivado"):
+    """👹 Monitora o tempo que cada membro passa nas calls privadas."""
+
+    LINHAS_POR_EMBED = 15      # membros por embed no m!privadotodos
+    HISTORICO_MAX = 20         # sessões guardadas por pessoa
+
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+        # (guild_id, user_id) -> {"canal": id, "inicio": ts real, "cursor": ts do último salvamento}
+        self.sessoes: dict[tuple[int, int], dict] = {}
+        self._seeded = False
+        self.salvar_periodico.start()
+
+    def cog_unload(self):
+        self.salvar_periodico.cancel()
+        try:
+            self._flush()
+        except Exception as ex:
+            print(f"[privado] falha ao salvar no desligamento: {ex!r}")
+
+    # ── helpers de dados ──────────────────────────
+
+    @staticmethod
+    def _agora() -> float:
+        return datetime.now(timezone.utc).timestamp()
+
+    @staticmethod
+    def _user(todos: dict, gid: int, uid: int) -> dict:
+        g = todos.setdefault(str(gid), {})
+        u = g.setdefault(str(uid), {})
+        u.setdefault("canais", {})        # canal_id -> segundos
+        u.setdefault("sessoes", 0)
+        u.setdefault("maior", 0)          # maior sessão (segundos)
+        u.setdefault("ultima_saida", None)
+        u.setdefault("historico", [])     # [{"canal", "inicio", "dur"}]
+        return u
+
+    def _somar(self, todos: dict, gid: int, uid: int, canal_id: int, segundos: float):
+        if segundos <= 0:
+            return
+        u = self._user(todos, gid, uid)
+        k = str(canal_id)
+        u["canais"][k] = u["canais"].get(k, 0) + segundos
+
+    # ── contagem ──────────────────────────────────
+
+    def _abrir(self, gid: int, uid: int, canal_id: int, agora: float):
+        self.sessoes[(gid, uid)] = {"canal": canal_id, "inicio": agora, "cursor": agora}
+        todos = _load(PRIVADO_FILE, {})
+        self._user(todos, gid, uid)["sessoes"] += 1
+        _save(PRIVADO_FILE, todos)
+
+    def _fechar(self, gid: int, uid: int, agora: float):
+        s = self.sessoes.pop((gid, uid), None)
+        if not s:
+            return
+        todos = _load(PRIVADO_FILE, {})
+        self._somar(todos, gid, uid, s["canal"], agora - s["cursor"])
+        u = self._user(todos, gid, uid)
+        duracao = max(0, agora - s["inicio"])
+        u["maior"] = max(u["maior"], duracao)
+        u["ultima_saida"] = agora
+        u["historico"].append({"canal": s["canal"], "inicio": s["inicio"], "dur": duracao})
+        u["historico"] = u["historico"][-self.HISTORICO_MAX:]
+        _save(PRIVADO_FILE, todos)
+
+    def _flush(self):
+        """Grava o tempo acumulado de quem está em call privada agora (sem fechar a sessão)."""
+        if not self.sessoes:
+            return
+        agora = self._agora()
+        todos = _load(PRIVADO_FILE, {})
+        for (gid, uid), s in self.sessoes.items():
+            self._somar(todos, gid, uid, s["canal"], agora - s["cursor"])
+            s["cursor"] = agora
+        _save(PRIVADO_FILE, todos)
+
+    def _semear(self):
+        """Quando o bot liga, começa a contar quem já estava numa call privada."""
+        agora = self._agora()
+        for guild in self.bot.guilds:
+            for cid in CALLS_PRIVADAS_IDS:
+                vc = guild.get_channel(cid)
+                if not vc:
+                    continue
+                for m in vc.members:
+                    if not m.bot and (guild.id, m.id) not in self.sessoes:
+                        self._abrir(guild.id, m.id, cid, agora)
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        if not self._seeded:
+            self._seeded = True
+            self._semear()
+
+    @commands.Cog.listener()
+    async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+        if member.bot:
+            return
+        antes = before.channel.id if before.channel and before.channel.id in CALLS_PRIVADAS_IDS else None
+        depois = after.channel.id if after.channel and after.channel.id in CALLS_PRIVADAS_IDS else None
+        if antes == depois:
+            return   # mutou/desmutou/ligou câmera na mesma call, ou nenhuma é privada
+        agora = self._agora()
+        if antes:
+            self._fechar(member.guild.id, member.id, agora)
+        if depois:
+            self._abrir(member.guild.id, member.id, depois, agora)
+
+    @tasks.loop(seconds=60)
+    async def salvar_periodico(self):
+        try:
+            self._flush()
+        except Exception as ex:
+            print(f"[privado] falha ao salvar tempo: {ex!r}")
+
+    @salvar_periodico.before_loop
+    async def before_salvar(self):
+        await self.bot.wait_until_ready()
+        if not self._seeded:
+            self._seeded = True
+            self._semear()
+
+    # ── consulta (já somando a sessão em andamento) ──
+
+    def _perfil(self, gid: int, uid: int):
+        """Devolve um dict com os dados da pessoa, incluindo o tempo da sessão ao vivo.
+        None se a pessoa nunca entrou em call privada."""
+        todos = _load(PRIVADO_FILE, {})
+        bruto = todos.get(str(gid), {}).get(str(uid))
+        s = self.sessoes.get((gid, uid))
+        if not bruto and not s:
+            return None
+        p = {
+            "canais": dict((bruto or {}).get("canais", {})),
+            "sessoes": (bruto or {}).get("sessoes", 0),
+            "maior": (bruto or {}).get("maior", 0),
+            "ultima_saida": (bruto or {}).get("ultima_saida"),
+            "historico": list((bruto or {}).get("historico", [])),
+            "ao_vivo": None,
+        }
+        if s:
+            agora = self._agora()
+            k = str(s["canal"])
+            p["canais"][k] = p["canais"].get(k, 0) + max(0, agora - s["cursor"])
+            p["maior"] = max(p["maior"], agora - s["inicio"])
+            p["ao_vivo"] = s["canal"]
+        p["total"] = sum(p["canais"].values())
+        return p
+
+    @staticmethod
+    def _nome_canal(guild: discord.Guild, cid) -> str:
+        ch = guild.get_channel(int(cid))
+        return ch.mention if ch else f"`{cid}`"
+
+    # ── comandos ──────────────────────────────────
+
+    @commands.command(name="privado")
+    @commands.guild_only()
+    @commands.has_permissions(manage_guild=True)
+    async def privado(self, ctx: commands.Context, usuario: discord.User = None):
+        if usuario is None:
+            await ctx.send(embed=embed_erro("marca a pessoa!! ex: `m!privado @fulano` 🕵️"))
+            return
+
+        p = self._perfil(ctx.guild.id, usuario.id)
+        if not p or p["total"] < 1:
+            await ctx.send(embed=embed_info(
+                "🕵️ Calls Privadas",
+                f"{usuario.mention} ainda não ficou em nenhuma call privada desde que comecei a monitorar!! 👹",
+                cor=COR_ROXO,
+            ))
+            return
+
+        e = discord.Embed(
+            title=f"🕵️ Calls Privadas — {usuario.display_name}",
+            color=COR_LARANJA, timestamp=datetime.now(timezone.utc),
+        )
+        e.set_thumbnail(url=usuario.display_avatar.url)
+        e.add_field(name="⏱️ Tempo total", value=f"`{_fmt_tempo_call(p['total'])}`", inline=True)
+        e.add_field(name="🔁 Sessões", value=f"`{p['sessoes']}`", inline=True)
+        e.add_field(name="🏅 Maior sessão", value=f"`{_fmt_tempo_call(p['maior'])}`", inline=True)
+
+        if p["ao_vivo"]:
+            agora_txt = f"🔊 {self._nome_canal(ctx.guild, p['ao_vivo'])}"
+        else:
+            agora_txt = "não"
+        e.add_field(name="📍 Em call privada agora", value=agora_txt, inline=True)
+        if p["ultima_saida"]:
+            e.add_field(name="🚪 Última saída", value=f"<t:{int(p['ultima_saida'])}:R>", inline=True)
+
+        por_call = sorted(p["canais"].items(), key=lambda kv: -kv[1])
+        linhas = []
+        for cid, seg in por_call:
+            pct = (seg / p["total"] * 100) if p["total"] else 0
+            linhas.append(f"{self._nome_canal(ctx.guild, cid)} — `{_fmt_tempo_call(seg)}` ({pct:.0f}%)")
+        e.add_field(name="🎙️ Tempo por call", value="\n".join(linhas)[:1000] or "—", inline=False)
+
+        if p["historico"]:
+            ult = []
+            for h in reversed(p["historico"][-5:]):
+                ult.append(
+                    f"• {self._nome_canal(ctx.guild, h['canal'])} — `{_fmt_tempo_call(h['dur'])}` — <t:{int(h['inicio'])}:R>"
+                )
+            e.add_field(name="🕒 Últimas sessões", value="\n".join(ult)[:1000], inline=False)
+
+        e.set_footer(text="👹 Monstrão • Monitoramento de Calls Privadas")
+        await ctx.send(embed=e)
+
+    @commands.command(name="privadotodos")
+    @commands.guild_only()
+    @commands.has_permissions(manage_guild=True)
+    async def privado_todos(self, ctx: commands.Context):
+        todos = _load(PRIVADO_FILE, {})
+        uids = {int(u) for u in todos.get(str(ctx.guild.id), {})}
+        uids |= {uid for (gid, uid) in self.sessoes if gid == ctx.guild.id}
+
+        perfis = []
+        for uid in uids:
+            p = self._perfil(ctx.guild.id, uid)
+            if p and p["total"] >= 1:
+                perfis.append((uid, p))
+        perfis.sort(key=lambda x: -x[1]["total"])
+
+        if not perfis:
+            await ctx.send(embed=embed_info(
+                "🕵️ Calls Privadas",
+                "ninguém ficou em call privada desde que comecei a monitorar!! 👹",
+                cor=COR_ROXO,
+            ))
+            return
+
+        soma = sum(p["total"] for _u, p in perfis)
+        em_call = sum(1 for _u, p in perfis if p["ao_vivo"])
+        medalhas = ["🥇", "🥈", "🥉"]
+
+        blocos = [perfis[i:i + self.LINHAS_POR_EMBED] for i in range(0, len(perfis), self.LINHAS_POR_EMBED)]
+        embeds = []
+        for n, bloco in enumerate(blocos):
+            linhas = []
+            for j, (uid, p) in enumerate(bloco):
+                pos = n * self.LINHAS_POR_EMBED + j
+                marca = medalhas[pos] if pos < 3 else f"**{pos + 1}º**"
+                vivo = " 🔊" if p["ao_vivo"] else ""
+                linhas.append(
+                    f"{marca} <@{uid}> — `{_fmt_tempo_call(p['total'])}` • {p['sessoes']} sessão(ões){vivo}"
+                )
+                por_call = sorted(p["canais"].items(), key=lambda kv: -kv[1])
+                detalhe = " • ".join(
+                    f"{self._nome_canal(ctx.guild, cid)} `{_fmt_tempo_call(seg)}`" for cid, seg in por_call
+                )
+                linhas.append(f"-# {detalhe}")
+
+            e = discord.Embed(
+                title="🕵️ Calls Privadas — Todos" + (f" ({n + 1}/{len(blocos)})" if len(blocos) > 1 else ""),
+                description="\n".join(linhas),
+                color=COR_LARANJA, timestamp=datetime.now(timezone.utc),
+            )
+            if n == 0:
+                e.add_field(name="👥 Pessoas", value=f"`{len(perfis)}`", inline=True)
+                e.add_field(name="⏱️ Tempo somado", value=f"`{_fmt_tempo_call(soma)}`", inline=True)
+                e.add_field(name="🔊 Em call agora", value=f"`{em_call}`", inline=True)
+            e.set_footer(text="👹 Monstrão • 🔊 = está em call privada agora")
+            embeds.append(e)
+
+        for i in range(0, len(embeds), 10):   # limite do Discord: 10 embeds por mensagem
+            await ctx.send(embeds=embeds[i:i + 10])
+
+    async def cog_command_error(self, ctx: commands.Context, error: commands.CommandError):
+        if isinstance(error, commands.MissingPermissions):
+            await ctx.send(embed=embed_erro("só quem tem **Gerenciar Servidor** pode usar isso!! 👹"))
+        elif isinstance(error, (commands.BadArgument, commands.UserNotFound)):
+            await ctx.send(embed=embed_erro("não achei essa pessoa!! marca ela ou manda o ID certinho 🕵️"))
+        elif isinstance(error, commands.NoPrivateMessage):
+            pass
+        else:
+            raise error
+
+
+# ══════════════════════════════════════════════════════════════════
 #  📋  COMANDOS GERAIS
 # ══════════════════════════════════════════════════════════════════
 
@@ -3207,6 +3501,11 @@ async def monstrao_help(ctx: commands.Context):
         "*(a mensagem some sozinha em 5 minutos)*\n"
         "`m!setrankingcall #canal` — troca o canal do **ranking fixo ao vivo**, que fica sempre no ar "
         "e se atualiza sozinho a cada minuto"
+    ))
+    embed.add_field(name="🕵️ Calls Privadas", inline=False, value=(
+        "`m!privado @pessoa` — quanto tempo a pessoa ficou nas calls privadas, em qual call e as últimas sessões\n"
+        "`m!privadotodos` — todo mundo que ficou em call privada e o tempo de cada um "
+        "*(só staff com Gerenciar Servidor)*"
     ))
     embed.add_field(name="⚙️ Configuração", inline=False, value=(
         "`m!setlogvoz #canal` · `m!setlogchat #canal`\n"
@@ -3293,6 +3592,7 @@ async def _main():
         await bot.add_cog(DialogueCog(bot))
         await bot.add_cog(BirthdayCog(bot))
         await bot.add_cog(TicketCog(bot))
+        await bot.add_cog(PrivadoCog(bot))
 
         # Registra as views persistentes (sobrevivem a restarts)
         bot.add_view(VMPainelView(bot.cogs["MonstraoVoiceMaster"]))
