@@ -3479,6 +3479,133 @@ class PrivadoCog(commands.Cog, name="MonstraoPrivado"):
 
 
 # ══════════════════════════════════════════════════════════════════
+#  📜  LISTA — quem usou "m!lista @nome" no canal da lista
+# ══════════════════════════════════════════════════════════════════
+#
+# • No canal LISTA_CANAL_ID, qualquer pessoa manda:  m!lista @fulano
+#   → o Monstrão salva quem mandou + o que ela colocou, e reage com ✅
+# • O criador (CRIADOR_IDS) manda  m!lista  (sem nada depois), em qualquer canal
+#   → aparece a lista de quem usou, e do lado há quanto tempo cada um
+#     está no servidor.
+
+LISTA_CANAL_ID = 1565392716521541653
+LISTA_FILE = os.path.join(DATA_DIR, "monstrao_lista.json")
+
+# IDs que podem VER a lista (além do dono do bot no Discord)
+CRIADOR_IDS: set = {769951556388257812}
+
+LISTA_POR_EMBED = 15
+
+
+def _fmt_tempo_servidor(entrou_em) -> str:
+    """'1a 2m 5d' (anos / meses / dias) ou 'hoje' / 'Xh' pra quem acabou de entrar."""
+    if not entrou_em:
+        return "?"
+    delta = datetime.now(timezone.utc) - entrou_em
+    dias = delta.days
+    if dias < 1:
+        horas = int(delta.total_seconds() // 3600)
+        return f"{horas}h" if horas else "agora há pouco"
+    anos, resto = divmod(dias, 365)
+    meses, d = divmod(resto, 30)
+    partes = []
+    if anos:
+        partes.append(f"{anos}a")
+    if meses:
+        partes.append(f"{meses}m")
+    if d or not partes:
+        partes.append(f"{d}d")
+    return " ".join(partes)
+
+
+class ListaCog(commands.Cog, name="MonstraoLista"):
+    """👹 Registra quem usa m!lista no canal da lista."""
+
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+
+    def _entradas(self, guild_id: int) -> list:
+        return _load(LISTA_FILE, {}).get(str(guild_id), [])
+
+    def _salvar_entrada(self, guild_id: int, entrada: dict) -> int:
+        todos = _load(LISTA_FILE, {})
+        lista = todos.setdefault(str(guild_id), [])
+        lista.append(entrada)
+        _save(LISTA_FILE, todos)
+        return len(lista)
+
+    async def _eh_criador(self, user: discord.abc.User) -> bool:
+        if user.id in CRIADOR_IDS:
+            return True
+        try:
+            return await self.bot.is_owner(user)
+        except Exception:
+            return False
+
+    @commands.command(name="lista")
+    @commands.guild_only()
+    async def lista(self, ctx: commands.Context, *, texto: str = None):
+        # ── Com texto: registra (só no canal da lista) ──
+        if texto and texto.strip():
+            if ctx.channel.id != LISTA_CANAL_ID:
+                return   # fora do canal da lista, ignora
+            self._salvar_entrada(ctx.guild.id, {
+                "autor": ctx.author.id,
+                "texto": texto.strip()[:200],
+                "quando": datetime.now(timezone.utc).isoformat(),
+            })
+            try:
+                await ctx.message.add_reaction("✅")
+            except Exception:
+                pass
+            return
+
+        # ── Sem texto: só o criador vê a lista ──
+        if not await self._eh_criador(ctx.author):
+            if ctx.channel.id == LISTA_CANAL_ID:
+                await ctx.send(embed=embed_erro("use assim: `m!lista @nome` 👹"), delete_after=8)
+            return
+
+        entradas = self._entradas(ctx.guild.id)
+        if not entradas:
+            await ctx.send(embed=embed_info("📜 Lista", "ninguém usou o `m!lista` ainda!! 👹"))
+            return
+
+        # agrupa por pessoa (ordem de quem apareceu primeiro)
+        por_autor: dict = {}
+        for ent in entradas:
+            por_autor.setdefault(ent["autor"], []).append(ent)
+
+        linhas = []
+        for n, (uid, ents) in enumerate(por_autor.items(), start=1):
+            membro = ctx.guild.get_member(uid)
+            if membro and membro.joined_at:
+                tempo = f"no servidor há **{_fmt_tempo_servidor(membro.joined_at)}**"
+            else:
+                tempo = "**saiu do servidor**"
+            colocou = " • ".join(discord.utils.escape_markdown(e["texto"][:60]) for e in ents[-3:])
+            extra = f" (+{len(ents) - 3})" if len(ents) > 3 else ""
+            linhas.append(f"**{n}.** <@{uid}> — {tempo}\n-# colocou: {colocou}{extra}")
+
+        blocos = [linhas[i:i + LISTA_POR_EMBED] for i in range(0, len(linhas), LISTA_POR_EMBED)]
+        embeds = []
+        for i, bloco in enumerate(blocos):
+            e = discord.Embed(
+                title="📜 Lista" + (f" ({i + 1}/{len(blocos)})" if len(blocos) > 1 else ""),
+                description="\n".join(bloco),
+                color=COR_LARANJA, timestamp=datetime.now(timezone.utc),
+            )
+            if i == 0:
+                e.add_field(name="👥 Pessoas na lista", value=f"`{len(por_autor)}`", inline=True)
+                e.add_field(name="📝 Registros", value=f"`{len(entradas)}`", inline=True)
+            e.set_footer(text="👹 Monstrão • Lista")
+            embeds.append(e)
+
+        for i in range(0, len(embeds), 10):
+            await ctx.send(embeds=embeds[i:i + 10])
+
+
+# ══════════════════════════════════════════════════════════════════
 #  📋  COMANDOS GERAIS
 # ══════════════════════════════════════════════════════════════════
 
@@ -3532,6 +3659,11 @@ async def monstrao_help(ctx: commands.Context):
     embed.add_field(name="🕵️ Investigação", inline=False, value=(
         "`m!investigar <id> e <id>` — (pode mandar no PV do bot) avisa no canal de alertas "
         "que duas contas foram apontadas como mesmo IP *(só staff com Gerenciar Servidor)*"
+    ))
+    embed.add_field(name="📜 Lista", inline=False, value=(
+        "`m!lista @nome` — no canal da lista, registra o que você colocou\n"
+        "`m!lista` (sem nada) — mostra quem usou e há quanto tempo está no servidor "
+        "*(só o criador)*"
     ))
     embed.add_field(name="📋 Logs", inline=False, value="automático, assim que os canais forem configurados!!")
     embed.add_field(name="🎫 Tickets — Suporte & Recrutamento", inline=False, value=(
@@ -3593,6 +3725,7 @@ async def _main():
         await bot.add_cog(BirthdayCog(bot))
         await bot.add_cog(TicketCog(bot))
         await bot.add_cog(PrivadoCog(bot))
+        await bot.add_cog(ListaCog(bot))
 
         # Registra as views persistentes (sobrevivem a restarts)
         bot.add_view(VMPainelView(bot.cogs["MonstraoVoiceMaster"]))
