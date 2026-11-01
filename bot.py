@@ -127,6 +127,10 @@ CARGO_VISITANTE_ID = 1499002622881828924
 CANAL_VISITANTE_ID = 1499002824627847299
 IMAGEM_VISITANTE_URL = "https://cdn.discordapp.com/attachments/926913851172204577/1553980703362777138/ChatGPT_Image_28_de_set._de_2026_01_04_15.png?ex=6abb38cf&is=6ab9e74f&hm=21fb4f6e0bd8a1b15fcfd52692a4b2739ccde2558d8f3440bcb22a74fa3dae4e"
 
+# Cargo marcado (junto com a pessoa nova) nas boas-vindas de membro/visitante,
+# pra chamar a galera pra recepcionar quem chegou.
+CARGO_RECEPCAO_ID = 1565330867126145115
+
 # Cargo que, ao ser concedido a um membro, dispara uma mensagem de PARCERIA
 # (com imagem) sempre no canal fixo definido abaixo.
 CARGO_PARCERIA_ID = 1499002646651080794
@@ -1534,7 +1538,15 @@ class WelcomeCog(commands.Cog, name="MonstraoWelcome"):
                 e.set_image(url=IMAGEM_BOAS_VINDAS_ESPECIAL_URL)
                 e.set_footer(text="👹 Monstrão • CSI")
                 try:
-                    await canal.send(content=after.mention, embed=e)
+                    # marca a pessoa + o cargo de recepção pra galera dar as boas-vindas
+                    await canal.send(
+                        content=(
+                            f"{after.mention}\n"
+                            f"<@&{CARGO_RECEPCAO_ID}> vem dar as boas-vindas pra {after.mention}!! 🦇💚"
+                        ),
+                        embed=e,
+                        allowed_mentions=discord.AllowedMentions(users=True, roles=True),
+                    )
                 except Exception:
                     pass
 
@@ -1595,7 +1607,15 @@ class WelcomeCog(commands.Cog, name="MonstraoWelcome"):
                 e.set_image(url=IMAGEM_VISITANTE_URL)
                 e.set_footer(text="👹 Monstrão • CSI")
                 try:
-                    await canal.send(content=after.mention, embed=e)
+                    # marca a pessoa + o cargo de recepção pra galera dar as boas-vindas
+                    await canal.send(
+                        content=(
+                            f"{after.mention}\n"
+                            f"<@&{CARGO_RECEPCAO_ID}> chegou visitante!! vem dar as boas-vindas pra {after.mention}!! 🎟️🦇"
+                        ),
+                        embed=e,
+                        allowed_mentions=discord.AllowedMentions(users=True, roles=True),
+                    )
                 except Exception:
                     pass
 
