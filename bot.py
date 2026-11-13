@@ -3626,6 +3626,132 @@ class ListaCog(commands.Cog, name="MonstraoLista"):
 
 
 # ══════════════════════════════════════════════════════════════════
+#  🧰  BAÚ MISTERIOSO — m!bau (funciona no PV do bot)
+# ══════════════════════════════════════════════════════════════════
+#
+# • Você manda  m!bau  no PV do Monstrão
+#   → ele lança no canal CANAL_BAU_ID uma mensagem misteriosa com a imagem do baú
+#     e um botão embaixo.
+# • O PRIMEIRO que clicar no botão leva: o baú abre, o botão trava e aparece
+#   "Você achou um tesouro em robux!!" com o gif.
+
+CANAL_BAU_ID = 1499002824627847299
+IMAGEM_BAU_URL = "https://cdn.discordapp.com/attachments/926913851172204577/1570906451348689026/file_00000000e360820e96f6e9d2a7228694.png?ex=6af8cc24&is=6af77aa4&hm=c7e245bc4fbfa54b6500acff77180439dcd490d5506c3f0d241a8ff7e579b31b"
+GIF_BAU_URL = "https://cdn.discordapp.com/attachments/926913851172204577/1570906444528754819/1794603646746.gif?ex=6af8cc22&is=6af77aa2&hm=4c55a47898d1da8c4937f4670100b383eab30505da8c20504f0a1ba02841fce9"
+
+# Baús que já foram levados (id da mensagem). Evita que dois cliquem "ao mesmo tempo".
+_BAUS_ABERTOS: set = set()
+
+
+class BauView(discord.ui.View):
+    """Botão persistente do baú (continua funcionando depois de reiniciar o bot)."""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Abrir o baú", emoji="🧰", style=discord.ButtonStyle.green, custom_id="monstrao_bau_abrir")
+    async def abrir(self, interaction: discord.Interaction, button: discord.ui.Button):
+        msg_id = interaction.message.id
+
+        # Tudo até o add() roda sem nenhum "await" no meio, então só UM clique passa.
+        if msg_id in _BAUS_ABERTOS:
+            await interaction.response.send_message(
+                embed=embed_erro("alguém foi mais rápido e já levou esse baú!! 🥲🧰"), ephemeral=True
+            )
+            return
+        _BAUS_ABERTOS.add(msg_id)
+
+        # 1) trava o baú original (botão desativado + quem levou)
+        original = interaction.message.embeds[0] if interaction.message.embeds else None
+        e_aberto = discord.Embed(
+            title="🔓 O baú foi aberto!!",
+            description=f"{interaction.user.mention} foi o(a) mais rápido(a) e levou o tesouro!! 👹🔥",
+            color=COR_DOURADO,
+            timestamp=datetime.now(timezone.utc),
+        )
+        if original and original.image:
+            e_aberto.set_image(url=original.image.url)
+        e_aberto.set_footer(text="👹 Monstrão • CSI")
+
+        view_travada = BauView()
+        view_travada.abrir.disabled = True
+        view_travada.abrir.label = "Baú aberto"
+        view_travada.abrir.emoji = "🔓"
+        view_travada.abrir.style = discord.ButtonStyle.gray
+
+        try:
+            await interaction.response.edit_message(embed=e_aberto, view=view_travada)
+        except Exception as ex:
+            print(f"[bau] falha ao travar o baú: {ex!r}")
+            _BAUS_ABERTOS.discard(msg_id)
+            return
+
+        # 2) mensagem do prêmio, pública, com o gif
+        e_premio = discord.Embed(
+            title="💰 Você achou um tesouro em robux!!",
+            description=(
+                f"PARABÉNS, {interaction.user.mention}!! 🎉🔥\n\n"
+                f"você foi o(a) primeiro(a) a abrir o baú do Monstrão e achou um **tesouro em robux**!! 👹💎"
+            ),
+            color=COR_OK,
+            timestamp=datetime.now(timezone.utc),
+        )
+        e_premio.set_image(url=GIF_BAU_URL)
+        e_premio.set_footer(text="👹 Monstrão • CSI")
+        try:
+            await interaction.followup.send(
+                content=interaction.user.mention,
+                embed=e_premio,
+                allowed_mentions=discord.AllowedMentions(users=True),
+            )
+        except Exception as ex:
+            print(f"[bau] falha ao enviar a mensagem do prêmio: {ex!r}")
+
+
+@bot.command(name="bau", aliases=["baú"])
+async def bau(ctx: commands.Context):
+    """Lança o baú misterioso no canal CANAL_BAU_ID. Pode ser usado no PV do bot."""
+    # só o criador (CRIADOR_IDS) ou o dono do bot no Discord
+    autorizado = ctx.author.id in CRIADOR_IDS
+    if not autorizado:
+        try:
+            autorizado = await bot.is_owner(ctx.author)
+        except Exception:
+            autorizado = False
+    if not autorizado:
+        await ctx.send(embed=embed_erro("só o criador do Monstrão pode soltar o baú!! 👹"))
+        return
+
+    try:
+        canal = bot.get_channel(CANAL_BAU_ID) or await bot.fetch_channel(CANAL_BAU_ID)
+    except Exception:
+        await ctx.send(embed=embed_erro("não consegui acessar o canal do baú!! confere se eu tenho permissão lá 😢"))
+        return
+
+    e = discord.Embed(
+        title="🧰 ??? Algo misterioso apareceu...",
+        description=(
+            "o Monstrão estava farejando por aí quando **esbarrou num baú misterioso**... 👀\n\n"
+            "ninguém sabe o que tem dentro dele... pode ser nada, pode ser algo **MUITO** bom!! 💎🔥\n\n"
+            "**seja o primeiro a abrir** e descubra o que o Monstrão encontrou!! 👹"
+        ),
+        color=COR_ROXO,
+        timestamp=datetime.now(timezone.utc),
+    )
+    e.set_image(url=IMAGEM_BAU_URL)
+    e.set_footer(text="👹 Monstrão • só o mais rápido leva!!")
+
+    try:
+        await canal.send(embed=e, view=BauView())
+    except Exception as ex:
+        print(f"[bau] falha ao enviar o baú: {ex!r}")
+        await ctx.send(embed=embed_erro("não consegui mandar o baú no canal!! confere minhas permissões lá 😢"))
+        return
+
+    await ctx.send(embed=embed_ok("🧰 Baú Lançado!!", f"soltei o baú em {canal.mention}!! que vença o mais rápido!! 👹🔥"))
+
+
+# ══════════════════════════════════════════════════════════════════
 #  📋  COMANDOS GERAIS
 # ══════════════════════════════════════════════════════════════════
 
@@ -3754,6 +3880,7 @@ async def _main():
         bot.add_view(TicketFecharView())
         bot.add_view(TicketFecharReivindicarView())
         bot.add_view(FichaPreencherView())
+        bot.add_view(BauView())
 
         if not TOKEN:
             print("❌ ERRO: token não encontrado! Crie um .env com MONSTRAO_TOKEN=seu_token")
