@@ -3636,6 +3636,7 @@ class ListaCog(commands.Cog, name="MonstraoLista"):
 #   "Você achou um tesouro em robux!!" com o gif.
 
 CANAL_BAU_ID = 1499002824627847299
+CARGO_BAU_ID = 1522444449651626024   # Membro da CSI — só quem tem esse cargo consegue abrir o baú
 IMAGEM_BAU_URL = "https://cdn.discordapp.com/attachments/926913851172204577/1570906451348689026/file_00000000e360820e96f6e9d2a7228694.png?ex=6af8cc24&is=6af77aa4&hm=c7e245bc4fbfa54b6500acff77180439dcd490d5506c3f0d241a8ff7e579b31b"
 GIF_BAU_URL = "https://cdn.discordapp.com/attachments/926913851172204577/1570906444528754819/1794603646746.gif?ex=6af8cc22&is=6af77aa2&hm=4c55a47898d1da8c4937f4670100b383eab30505da8c20504f0a1ba02841fce9"
 
@@ -3652,6 +3653,16 @@ class BauView(discord.ui.View):
     @discord.ui.button(label="Abrir o baú", emoji="🧰", style=discord.ButtonStyle.green, custom_id="monstrao_bau_abrir")
     async def abrir(self, interaction: discord.Interaction, button: discord.ui.Button):
         msg_id = interaction.message.id
+
+        # Só quem tem o cargo de Membro da CSI pode abrir o baú.
+        # (checa ANTES de reservar o baú, pra um clique de quem não pode não "gastar" o prêmio)
+        cargos_do_usuario = {r.id for r in getattr(interaction.user, "roles", [])}
+        if CARGO_BAU_ID not in cargos_do_usuario:
+            await interaction.response.send_message(
+                embed=embed_erro(f"só quem é **Membro da CSI** (<@&{CARGO_BAU_ID}>) pode abrir esse baú!! 👹🔒"),
+                ephemeral=True,
+            )
+            return
 
         # Tudo até o add() roda sem nenhum "await" no meio, então só UM clique passa.
         if msg_id in _BAUS_ABERTOS:
