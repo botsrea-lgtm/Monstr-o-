@@ -12,6 +12,7 @@ Módulos:
   • Boas-vindas  — Recebe membros novos e registra quem convidou
   • Aniversários — Parabeniza a galera automaticamente
   • Diálogo      — Monstrão aprende a conversar com a galera
+  • Armadilha    — Canal-isca que castiga contas hackeadas/spammers
   • Config       — Comandos pra configurar os canais/categorias do bot
 
 Prefixo de comando: m!  (ou M!)
@@ -26,6 +27,7 @@ import json
 import random
 import io
 import unicodedata
+from collections import deque
 from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
@@ -137,6 +139,22 @@ CARGO_RECEPCAO_ID = 1565330867126145115
 CARGO_PARCERIA_ID = 1499002646651080794
 CANAL_PARCERIA_ID = 1499002824627847299
 IMAGEM_PARCERIA_URL = "https://cdn.discordapp.com/attachments/926913851172204577/1549443648444309584/ChatGPT_Image_15_de_set._de_2026_12_35_40.png?ex=6aaab759&is=6aa965d9&hm=3b2b98ff2fcde5f71857d4630f34aa955124df623da1ded84a2219d6ea7d06d0"
+
+# ══════════════════════════════════════════════════════════════════
+#  🪤  CANAL ARMADILHA (isca pra contas hackeadas / spammers)
+# ══════════════════════════════════════════════════════════════════
+# Quem mandar QUALQUER mensagem nesse canal:
+#   • leva mute (timeout) de ARMADILHA_MUTE_HORAS horas
+#   • tem apagado tudo que mandou em QUALQUER canal nos últimos ARMADILHA_JANELA_MIN minutos
+#   • recebe uma DM avisando pra falar com a staff
+#   • é anunciado(a) no próprio canal armadilha
+CANAL_ARMADILHA_ID = 1571256057727025232
+IMAGEM_ARMADILHA_URL = "https://cdn.discordapp.com/attachments/926913851172204577/1571257094961627226/file_000000000a58820eb9693bd23a845438.png?ex=6afa12b3&is=6af8c133&hm=0c509f7f64181418bb7df806fbcab926f2086db91a8cd240df1b1c8f8124f81f"
+ARMADILHA_MUTE_HORAS = 24
+ARMADILHA_JANELA_MIN = 5
+ARMADILHA_MAX_MSGS_RASTREADAS = 500   # teto de mensagens guardadas por pessoa (só ids, bem leve)
+ARMADILHA_COOLDOWN_SEG = 60           # msgs extras da mesma pessoa logo após cair são só apagadas
+ARMADILHA_MARCA = "🪤 Canal Armadilha • Monstrão"   # rodapé que identifica o painel fixo
 
 # Cargos que sempre podem ver e reivindicar os tickets da central de Recrutamento
 # (independente de qual cargo estiver configurado com m!setcargoticket recrutamento @cargo).
@@ -3123,7 +3141,8 @@ async def on_ready():
                 "👋 Boas-Vindas — recepção de membros\n"
                 "💌 Log de Convites — quem convidou quem\n"
                 "🎂 Aniversários — parabéns automático\n"
-                "💬 Diálogo — aprendizado conversacional"
+                "💬 Diálogo — aprendizado conversacional\n"
+                "🪤 Armadilha — canal-isca contra contas hackeadas"
             ))
             embed.set_footer(text="👹 Monstrão Bot • use m!configinfo pra ver os canais")
             try:
@@ -3894,8 +3913,7 @@ PALAVROES_PROIBIDOS = [
     "desgraça", "desgracado", "desgraçada",
     "viado", "vtnc", "vsf",
     "vai se foder", "vai tomar no cu",
-    "foda", "foder", "fodase", "fodasse", "foda-se", "fodeu", "fodido", "fodida",
-    "fuder", "fude", "fudeu", "fudendo", "fodendo", "fudido", "fudida",
+    "foda", "foder", "fodase", "foda-se", "fudido", "fudida",
     "cacete", "inferno", "pqp", "pnc",
     "buceta", "piroca", "rola",
     "corno", "corna", "babaca",
@@ -3910,9 +3928,6 @@ PALAVROES_CASTIGO_INICIAL_MIN = 10     # minutos de castigo quando ativa
 PALAVROES_CASTIGO_EXTRA_MIN   = 5      # minutos somados a cada palavrão durante o castigo
 PALAVROES_APAGAR_NOS_AVISOS   = False  # True = também apaga a mensagem nos 3 primeiros avisos
 PALAVROES_RESET_AVISOS_HORAS  = 24     # sem falar palavrão por esse tempo = avisos zerados
-
-# O "chefe": recebe as mesmas punições, mas o Monstrão responde na zoeira
-PALAVROES_DONO_ID = 445937581566197761
 
 # troca de números/símbolos por letras ("p0rra", "m3rda", "put@")
 _PALAVROES_LEET = str.maketrans({
@@ -4044,7 +4059,6 @@ class ModeracaoCog(commands.Cog, name="MonstraoModeracao"):
         chave = (gid, message.author.id)
         agora = datetime.now(timezone.utc)
         autor = message.author.mention
-        eh_chefe = message.author.id == PALAVROES_DONO_ID
 
         # castigo que já acabou: limpa em silêncio (o bot não avisa)
         fim = self._castigos.get(chave)
@@ -4058,18 +4072,11 @@ class ModeracaoCog(commands.Cog, name="MonstraoModeracao"):
             await self._apagar(message)
             fim = fim + timedelta(minutes=PALAVROES_CASTIGO_EXTRA_MIN)
             self._castigos[chave] = fim
-            if eh_chefe:
-                texto = (
-                    f"{autor} chefe, DE NOVO?? 😤 pode ser meu chefe, mas aqui não é terra sem lei!! "
-                    f"apaguei e o castigo subiu **+{PALAVROES_CASTIGO_EXTRA_MIN} min** 👹⚖️ "
-                    f"termina <t:{int(fim.timestamp())}:R>"
-                )
-            else:
-                texto = (
-                    f"{autor} insistiu, né?? 😤 apaguei de novo e o castigo aumentou "
-                    f"**+{PALAVROES_CASTIGO_EXTRA_MIN} min**!! termina <t:{int(fim.timestamp())}:R> 👹"
-                )
-            await self._avisar(message.channel, texto)
+            await self._avisar(
+                message.channel,
+                f"{autor} insistiu, né?? 😤 apaguei de novo e o castigo aumentou "
+                f"**+{PALAVROES_CASTIGO_EXTRA_MIN} min**!! termina <t:{int(fim.timestamp())}:R> 👹"
+            )
             return
 
         # ── fase de avisos ──
@@ -4088,17 +4095,11 @@ class ModeracaoCog(commands.Cog, name="MonstraoModeracao"):
                 if restam > 0 else
                 "**esse foi o último aviso!!** o próximo ativa o castigo 😈"
             )
-            if eh_chefe:
-                texto = (
-                    f"{autor} pode ser meu chefe, mas aqui não é terra sem lei!! 👹⚖️\n"
-                    f"⚠️ **aviso {n}/{PALAVROES_AVISOS_MAX}** — {extra}"
-                )
-            else:
-                texto = (
-                    f"{autor} ei, guerreiro(a)!! sem palavrão aqui na CSI!! 👹🚫\n"
-                    f"⚠️ **aviso {n}/{PALAVROES_AVISOS_MAX}** — {extra}"
-                )
-            await self._avisar(message.channel, texto)
+            await self._avisar(
+                message.channel,
+                f"{autor} ei, guerreiro(a)!! sem palavrão aqui na CSI!! 👹🚫\n"
+                f"⚠️ **aviso {n}/{PALAVROES_AVISOS_MAX}** — {extra}"
+            )
             return
 
         # ── 4º palavrão: ATIVA o castigo ──
@@ -4106,22 +4107,13 @@ class ModeracaoCog(commands.Cog, name="MonstraoModeracao"):
         fim = agora + timedelta(minutes=PALAVROES_CASTIGO_INICIAL_MIN)
         self._castigos[chave] = fim
         await self._apagar(message)
-        if eh_chefe:
-            texto = (
-                f"{autor} chefe, estourou os {PALAVROES_AVISOS_MAX} avisos!! 😂 "
-                f"pode ser meu chefe, mas aqui não é terra sem lei!! 🔥👹\n"
-                f"⛔ castigo de **{PALAVROES_CASTIGO_INICIAL_MIN} minutos** pro Owner — "
-                f"todo palavrão vai sumir, e se insistir eu somo **+{PALAVROES_CASTIGO_EXTRA_MIN} min**!! "
-                f"termina <t:{int(fim.timestamp())}:R>"
-            )
-        else:
-            texto = (
-                f"{autor} estourou os {PALAVROES_AVISOS_MAX} avisos!! 🔥👹\n"
-                f"⛔ castigo ativado por **{PALAVROES_CASTIGO_INICIAL_MIN} minutos** — "
-                f"todo palavrão seu vai sumir, e se insistir eu somo **+{PALAVROES_CASTIGO_EXTRA_MIN} min**!! "
-                f"termina <t:{int(fim.timestamp())}:R>"
-            )
-        await self._avisar(message.channel, texto)
+        await self._avisar(
+            message.channel,
+            f"{autor} estourou os {PALAVROES_AVISOS_MAX} avisos!! 🔥👹\n"
+            f"⛔ castigo ativado por **{PALAVROES_CASTIGO_INICIAL_MIN} minutos** — "
+            f"todo palavrão seu vai sumir, e se insistir eu somo **+{PALAVROES_CASTIGO_EXTRA_MIN} min**!! "
+            f"termina <t:{int(fim.timestamp())}:R>"
+        )
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -4133,6 +4125,286 @@ class ModeracaoCog(commands.Cog, name="MonstraoModeracao"):
         if before.content == after.content:
             return
         await self._checar(after)
+
+
+# ══════════════════════════════════════════════════════════════════
+#  🪤  ARMADILHA — CANAL-ISCA CONTRA CONTAS HACKEADAS
+# ══════════════════════════════════════════════════════════════════
+#
+#  Como funciona:
+#    • ao ligar, o Monstrão publica (ou atualiza) o aviso fixo no canal armadilha
+#    • o bot guarda (só em memória) os ids das mensagens de cada pessoa dos últimos minutos
+#    • se alguém falar no canal armadilha:
+#        1) mute de 24h  2) apaga tudo que a pessoa mandou nos últimos 5 min em QUALQUER canal
+#        3) DM avisando pra falar com a staff  4) avisa no próprio canal quem caiu
+#
+#  Permissões que o bot precisa: Moderar Membros, Gerenciar Mensagens,
+#  Ver Canais + Ler Histórico (em todos os canais) e o cargo dele precisa estar
+#  ACIMA do cargo mais alto de quem for punido. Administradores não podem ser mutados
+#  pelo Discord — nesse caso o bot só apaga a mensagem do canal e avisa que não deu.
+
+class ArmadilhaCog(commands.Cog, name="MonstraoArmadilha"):
+    """🪤 Canal-isca: castiga quem manda mensagem no canal armadilha."""
+
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+        # (guild_id, user_id) -> deque[(channel_id, message_id, datetime UTC)]
+        self._msgs: dict = {}
+        # (guild_id, user_id) -> datetime em que a pessoa caiu (evita punir 2x em sequência)
+        self._pegos: dict = {}
+        self._painel_publicado = False
+
+    async def cog_load(self):
+        self._limpar_memoria.start()
+
+    def cog_unload(self):
+        self._limpar_memoria.cancel()
+
+    # ───────────── memória das mensagens recentes ─────────────
+
+    def _registrar(self, message: discord.Message) -> None:
+        chave = (message.guild.id, message.author.id)
+        fila = self._msgs.get(chave)
+        if fila is None:
+            fila = deque(maxlen=ARMADILHA_MAX_MSGS_RASTREADAS)
+            self._msgs[chave] = fila
+        fila.append((message.channel.id, message.id, message.created_at))
+
+    @tasks.loop(minutes=1)
+    async def _limpar_memoria(self):
+        agora = datetime.now(timezone.utc)
+        corte = agora - timedelta(minutes=ARMADILHA_JANELA_MIN + 1)
+        for chave in list(self._msgs):
+            fila = self._msgs[chave]
+            while fila and fila[0][2] < corte:
+                fila.popleft()
+            if not fila:
+                del self._msgs[chave]
+        for chave, quando in list(self._pegos.items()):
+            if (agora - quando).total_seconds() > ARMADILHA_COOLDOWN_SEG:
+                del self._pegos[chave]
+
+    # ───────────── aviso fixo do canal (publica ao ligar) ─────────────
+
+    def _embed_painel(self) -> discord.Embed:
+        e = discord.Embed(
+            title="🪤👹 Não manda mensagem nesse canal!!",
+            description=(
+                "quem mandar **qualquer mensagem** aqui vai ser **castigado automaticamente**!! 🔥\n\n"
+                "esse canal é uma **armadilha** pra pegar contas hackeadas ou comprometidas!! "
+                "normalmente elas mandam mensagens em massa em todos os canais do servidor ao mesmo tempo, "
+                "e quando uma delas cai aqui, eu entro em ação!! 👹\n\n"
+                f"⛔ a pessoa leva **mute de {ARMADILHA_MUTE_HORAS} horas**\n"
+                f"🧹 eu apago tudo que ela mandou em **qualquer canal** nos últimos **{ARMADILHA_JANELA_MIN} minutos**\n"
+                "📩 aviso ela no privado pra falar com a staff\n\n"
+                "se você caiu aqui sem querer, calma!! é só chamar a staff da CSI pra tirar o mute, "
+                "guerreiro(a)!! 💚"
+            ),
+            color=COR_ERRO,
+        )
+        e.set_thumbnail(url=IMAGEM_ARMADILHA_URL)
+        e.set_footer(text=ARMADILHA_MARCA)
+        return e
+
+    async def _publicar_painel(self, guild: discord.Guild) -> None:
+        canal = guild.get_channel(CANAL_ARMADILHA_ID)
+        if canal is None:
+            return  # esse canal é de outro servidor
+        embed = self._embed_painel()
+
+        msg = None
+        # 1) tenta achar pelo id salvo (não duplica o painel a cada reinício)
+        msg_id = get_config(guild.id).get("armadilha_painel_msg_id")
+        if msg_id:
+            try:
+                msg = await canal.fetch_message(int(msg_id))
+            except discord.HTTPException:
+                msg = None
+        # 2) senão procura no histórico recente pelo rodapé
+        if msg is None:
+            try:
+                async for m in canal.history(limit=50):
+                    if (
+                        m.author.id == self.bot.user.id and m.embeds
+                        and m.embeds[0].footer and m.embeds[0].footer.text == ARMADILHA_MARCA
+                    ):
+                        msg = m
+                        break
+            except discord.HTTPException:
+                pass
+
+        try:
+            if msg is not None:
+                await msg.edit(embed=embed)
+            else:
+                msg = await canal.send(embed=embed)
+            set_config_value(guild.id, "armadilha_painel_msg_id", msg.id)
+        except discord.HTTPException as ex:
+            print(f"⚠️ Armadilha: não consegui publicar o aviso no canal {CANAL_ARMADILHA_ID}: {ex}")
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        # roda só uma vez por processo (o discord.py chama on_ready de novo após reconexões)
+        if self._painel_publicado:
+            return
+        self._painel_publicado = True
+        for guild in self.bot.guilds:
+            await self._publicar_painel(guild)
+
+    # ───────────── detecção ─────────────
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        if not message.guild or message.author.bot or message.webhook_id:
+            return
+        self._registrar(message)
+        if message.channel.id != CANAL_ARMADILHA_ID:
+            return
+        await self._cair_na_armadilha(message)
+
+    # ───────────── ações ─────────────
+
+    async def _apagar_no_canal(self, canal, ids: list) -> int:
+        """Apaga as mensagens `ids` de um canal. Retorna quantas foram apagadas."""
+        apagadas = 0
+        for i in range(0, len(ids), 100):
+            lote = ids[i:i + 100]
+            try:
+                if len(lote) == 1:
+                    await canal.get_partial_message(lote[0]).delete()
+                else:
+                    await canal.delete_messages([discord.Object(id=x) for x in lote])
+                apagadas += len(lote)
+            except discord.Forbidden:
+                break  # sem permissão nesse canal: não adianta insistir
+            except discord.NotFound:
+                continue
+            except discord.HTTPException:
+                # bulk falhou (ex.: msg velha demais) → tenta uma por uma
+                for x in lote:
+                    try:
+                        await canal.get_partial_message(x).delete()
+                        apagadas += 1
+                    except discord.HTTPException:
+                        pass
+        return apagadas
+
+    async def _apagar_mensagens(self, guild: discord.Guild, alvos: dict) -> tuple:
+        """alvos: {channel_id: {message_ids}}. Retorna (total_apagado, canais_com_apagadas)."""
+        tarefas = []
+        for cid, ids in alvos.items():
+            canal = guild.get_channel_or_thread(cid)
+            if canal is None or not hasattr(canal, "get_partial_message"):
+                continue
+            tarefas.append(self._apagar_no_canal(canal, list(ids)))
+        resultados = await asyncio.gather(*tarefas, return_exceptions=True)
+        contagens = [r for r in resultados if isinstance(r, int)]
+        return sum(contagens), sum(1 for r in contagens if r > 0)
+
+    async def _cair_na_armadilha(self, message: discord.Message) -> None:
+        guild = message.guild
+        membro = message.author
+        if not isinstance(membro, discord.Member):
+            membro = guild.get_member(membro.id)
+            if membro is None:
+                try:
+                    membro = await guild.fetch_member(message.author.id)
+                except discord.HTTPException:
+                    await self._apagar_no_canal(message.channel, [message.id])
+                    return
+
+        chave = (guild.id, membro.id)
+        agora = datetime.now(timezone.utc)
+
+        # quem manda várias de uma vez: a 1ª msg faz a punição, as outras só somem
+        ultimo = self._pegos.get(chave)
+        if ultimo and (agora - ultimo).total_seconds() < ARMADILHA_COOLDOWN_SEG:
+            await self._apagar_no_canal(message.channel, [message.id])
+            return
+        self._pegos[chave] = agora
+
+        # ── 1) MUTE primeiro (corta o spam o mais rápido possível) ──
+        duracao = timedelta(hours=ARMADILHA_MUTE_HORAS)
+        fim = agora + duracao
+        mutado = False
+        try:
+            await membro.timeout(duracao, reason="🪤 Mandou mensagem no canal armadilha (possível conta hackeada)")
+            mutado = True
+        except discord.HTTPException as ex:
+            print(f"⚠️ Armadilha: não consegui mutar {membro} ({membro.id}): {ex}")
+
+        # ── 2) apaga mensagens ──
+        # mutou → apaga tudo dos últimos 5 min (em qualquer canal) + a do canal armadilha
+        # não conseguiu mutar → só apaga a mensagem do canal armadilha (não mexe no resto)
+        alvos: dict = {message.channel.id: {message.id}}
+        if mutado:
+            limite = message.created_at - timedelta(minutes=ARMADILHA_JANELA_MIN)
+            for cid, mid, quando in list(self._msgs.get(chave, ())):
+                if quando >= limite:
+                    alvos.setdefault(cid, set()).add(mid)
+        self._msgs.pop(chave, None)
+        total_apagadas, canais_limpos = await self._apagar_mensagens(guild, alvos)
+
+        # ── 3) DM pra pessoa ──
+        dm_ok = False
+        if mutado:
+            e_dm = discord.Embed(
+                title="🪤 Ihh, você caiu na armadilha!!",
+                description=(
+                    f"e aí, **{membro.display_name}**!! você mandou uma mensagem no canal **armadilha** "
+                    f"da **{guild.name}**, que serve pra pegar contas hackeadas. 👹\n\n"
+                    f"⛔ por segurança você ficou **mutado por {ARMADILHA_MUTE_HORAS} horas** "
+                    f"(termina <t:{int(fim.timestamp())}:R>)\n"
+                    f"🧹 as mensagens que você mandou nos últimos **{ARMADILHA_JANELA_MIN} minutos** "
+                    f"foram apagadas\n\n"
+                    f"**se foi engano, ou se sua conta foi hackeada e você já recuperou, "
+                    f"avise a staff** pra retirar o seu mute, guerreiro(a)!! 💚\n\n"
+                    f"💡 se foi hackeada: troque a senha, ative a verificação em duas etapas e "
+                    f"remova apps/sessões que você não reconhece."
+                ),
+                color=COR_ERRO, timestamp=datetime.now(timezone.utc),
+            )
+            e_dm.set_footer(text="👹 Monstrão • CSI")
+            try:
+                await membro.send(embed=e_dm)
+                dm_ok = True
+            except discord.HTTPException:
+                dm_ok = False  # DM fechada / bloqueou o bot
+
+        # ── 4) avisa no próprio canal armadilha ──
+        if mutado:
+            linhas = [
+                f"{membro.mention} (`{membro}` • `{membro.id}`) mandou mensagem no canal armadilha!! 👹🔥\n",
+                f"⛔ **mutado por {ARMADILHA_MUTE_HORAS}h** — termina <t:{int(fim.timestamp())}:R>",
+                f"🧹 **{total_apagadas}** mensagem(ns) apagada(s) em **{canais_limpos}** canal(is) "
+                f"(últimos {ARMADILHA_JANELA_MIN} min)",
+                "📩 DM enviada avisando pra falar com a staff" if dm_ok
+                else "📪 não consegui mandar DM (privado fechado)",
+                "\n🛡️ **staff:** se foi engano, é só remover o castigo (timeout) dessa pessoa.",
+            ]
+            e = discord.Embed(title="🪤👹 Caiu na armadilha!!", description="\n".join(linhas),
+                              color=COR_ERRO, timestamp=datetime.now(timezone.utc))
+        else:
+            e = discord.Embed(
+                title="🪤⚠️ Caiu na armadilha, mas eu não consegui mutar!!",
+                description=(
+                    f"{membro.mention} (`{membro}` • `{membro.id}`) mandou mensagem no canal armadilha, "
+                    f"mas eu **não consegui aplicar o mute** 😢\n\n"
+                    f"provavelmente o cargo da pessoa é **maior que o meu** (ou ela é administradora). "
+                    f"apaguei só a mensagem dela aqui.\n\n"
+                    f"🛡️ **staff:** dá uma olhada nessa conta agora!!"
+                ),
+                color=COR_LARANJA, timestamp=datetime.now(timezone.utc),
+            )
+        e.set_thumbnail(url=membro.display_avatar.url)
+        e.set_footer(text="👹 Monstrão • CSI")
+        try:
+            await message.channel.send(
+                content=membro.mention, embed=e,
+                allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
+            )
+        except discord.HTTPException:
+            pass
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -4152,6 +4424,7 @@ async def _main():
         await bot.add_cog(PrivadoCog(bot))
         await bot.add_cog(ListaCog(bot))
         await bot.add_cog(ModeracaoCog(bot))
+        await bot.add_cog(ArmadilhaCog(bot))
 
         # Registra as views persistentes (sobrevivem a restarts)
         bot.add_view(VMPainelView(bot.cogs["MonstraoVoiceMaster"]))
