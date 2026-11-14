@@ -3894,7 +3894,8 @@ PALAVROES_PROIBIDOS = [
     "desgraça", "desgracado", "desgraçada",
     "viado", "vtnc", "vsf",
     "vai se foder", "vai tomar no cu",
-    "foda", "foder", "fodase", "foda-se", "fudido", "fudida",
+    "foda", "foder", "fodase", "fodasse", "foda-se", "fodeu", "fodido", "fodida",
+    "fuder", "fude", "fudeu", "fudendo", "fodendo", "fudido", "fudida",
     "cacete", "inferno", "pqp", "pnc",
     "buceta", "piroca", "rola",
     "corno", "corna", "babaca",
@@ -3909,6 +3910,9 @@ PALAVROES_CASTIGO_INICIAL_MIN = 10     # minutos de castigo quando ativa
 PALAVROES_CASTIGO_EXTRA_MIN   = 5      # minutos somados a cada palavrão durante o castigo
 PALAVROES_APAGAR_NOS_AVISOS   = False  # True = também apaga a mensagem nos 3 primeiros avisos
 PALAVROES_RESET_AVISOS_HORAS  = 24     # sem falar palavrão por esse tempo = avisos zerados
+
+# O "chefe": recebe as mesmas punições, mas o Monstrão responde na zoeira
+PALAVROES_DONO_ID = 445937581566197761
 
 # troca de números/símbolos por letras ("p0rra", "m3rda", "put@")
 _PALAVROES_LEET = str.maketrans({
@@ -4040,6 +4044,7 @@ class ModeracaoCog(commands.Cog, name="MonstraoModeracao"):
         chave = (gid, message.author.id)
         agora = datetime.now(timezone.utc)
         autor = message.author.mention
+        eh_chefe = message.author.id == PALAVROES_DONO_ID
 
         # castigo que já acabou: limpa em silêncio (o bot não avisa)
         fim = self._castigos.get(chave)
@@ -4053,11 +4058,18 @@ class ModeracaoCog(commands.Cog, name="MonstraoModeracao"):
             await self._apagar(message)
             fim = fim + timedelta(minutes=PALAVROES_CASTIGO_EXTRA_MIN)
             self._castigos[chave] = fim
-            await self._avisar(
-                message.channel,
-                f"{autor} insistiu, né?? 😤 apaguei de novo e o castigo aumentou "
-                f"**+{PALAVROES_CASTIGO_EXTRA_MIN} min**!! termina <t:{int(fim.timestamp())}:R> 👹"
-            )
+            if eh_chefe:
+                texto = (
+                    f"{autor} chefe, DE NOVO?? 😤 pode ser meu chefe, mas aqui não é terra sem lei!! "
+                    f"apaguei e o castigo subiu **+{PALAVROES_CASTIGO_EXTRA_MIN} min** 👹⚖️ "
+                    f"termina <t:{int(fim.timestamp())}:R>"
+                )
+            else:
+                texto = (
+                    f"{autor} insistiu, né?? 😤 apaguei de novo e o castigo aumentou "
+                    f"**+{PALAVROES_CASTIGO_EXTRA_MIN} min**!! termina <t:{int(fim.timestamp())}:R> 👹"
+                )
+            await self._avisar(message.channel, texto)
             return
 
         # ── fase de avisos ──
@@ -4076,11 +4088,17 @@ class ModeracaoCog(commands.Cog, name="MonstraoModeracao"):
                 if restam > 0 else
                 "**esse foi o último aviso!!** o próximo ativa o castigo 😈"
             )
-            await self._avisar(
-                message.channel,
-                f"{autor} ei, guerreiro(a)!! sem palavrão aqui na CSI!! 👹🚫\n"
-                f"⚠️ **aviso {n}/{PALAVROES_AVISOS_MAX}** — {extra}"
-            )
+            if eh_chefe:
+                texto = (
+                    f"{autor} pode ser meu chefe, mas aqui não é terra sem lei!! 👹⚖️\n"
+                    f"⚠️ **aviso {n}/{PALAVROES_AVISOS_MAX}** — {extra}"
+                )
+            else:
+                texto = (
+                    f"{autor} ei, guerreiro(a)!! sem palavrão aqui na CSI!! 👹🚫\n"
+                    f"⚠️ **aviso {n}/{PALAVROES_AVISOS_MAX}** — {extra}"
+                )
+            await self._avisar(message.channel, texto)
             return
 
         # ── 4º palavrão: ATIVA o castigo ──
@@ -4088,13 +4106,22 @@ class ModeracaoCog(commands.Cog, name="MonstraoModeracao"):
         fim = agora + timedelta(minutes=PALAVROES_CASTIGO_INICIAL_MIN)
         self._castigos[chave] = fim
         await self._apagar(message)
-        await self._avisar(
-            message.channel,
-            f"{autor} estourou os {PALAVROES_AVISOS_MAX} avisos!! 🔥👹\n"
-            f"⛔ castigo ativado por **{PALAVROES_CASTIGO_INICIAL_MIN} minutos** — "
-            f"todo palavrão seu vai sumir, e se insistir eu somo **+{PALAVROES_CASTIGO_EXTRA_MIN} min**!! "
-            f"termina <t:{int(fim.timestamp())}:R>"
-        )
+        if eh_chefe:
+            texto = (
+                f"{autor} chefe, estourou os {PALAVROES_AVISOS_MAX} avisos!! 😂 "
+                f"pode ser meu chefe, mas aqui não é terra sem lei!! 🔥👹\n"
+                f"⛔ castigo de **{PALAVROES_CASTIGO_INICIAL_MIN} minutos** pro Owner — "
+                f"todo palavrão vai sumir, e se insistir eu somo **+{PALAVROES_CASTIGO_EXTRA_MIN} min**!! "
+                f"termina <t:{int(fim.timestamp())}:R>"
+            )
+        else:
+            texto = (
+                f"{autor} estourou os {PALAVROES_AVISOS_MAX} avisos!! 🔥👹\n"
+                f"⛔ castigo ativado por **{PALAVROES_CASTIGO_INICIAL_MIN} minutos** — "
+                f"todo palavrão seu vai sumir, e se insistir eu somo **+{PALAVROES_CASTIGO_EXTRA_MIN} min**!! "
+                f"termina <t:{int(fim.timestamp())}:R>"
+            )
+        await self._avisar(message.channel, texto)
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
