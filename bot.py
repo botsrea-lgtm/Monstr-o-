@@ -25,6 +25,7 @@ import re
 import json
 import random
 import io
+import unicodedata
 from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
@@ -3822,6 +3823,11 @@ async def monstrao_help(ctx: commands.Context):
         "`m!lista` (sem nada) — mostra quem usou e há quanto tempo está no servidor "
         "*(só o criador)*"
     ))
+    embed.add_field(name="🚫 Moderação de Palavrões", inline=False, value=(
+        "`m!palavrões on` / `m!palavrões off` — liga/desliga *(só staff com Gerenciar Servidor)*\n"
+        "3 avisos (somem em 1 min) → no 4º palavrão ativa o castigo de **10 min**, "
+        "e cada palavrão durante o castigo soma **+5 min**"
+    ))
     embed.add_field(name="📋 Logs", inline=False, value="automático, assim que os canais forem configurados!!")
     embed.add_field(name="🎫 Tickets — Suporte & Recrutamento", inline=False, value=(
         "`m!ticketpainel [#canal]` — publica/atualiza o painel de suporte\n"
@@ -3868,6 +3874,241 @@ async def monstrao_info(ctx: commands.Context):
 
 
 # ══════════════════════════════════════════════════════════════════
+#  🚫  MODERAÇÃO DE PALAVRÕES  (m!palavrões on / off)
+# ══════════════════════════════════════════════════════════════════
+#
+#  Como funciona (por pessoa):
+#    • 1º, 2º e 3º palavrão  → o Monstrão dá um AVISO (some sozinho em 1 minuto)
+#    • 4º palavrão           → o castigo ATIVA: por 10 minutos todo palavrão
+#                              que a pessoa falar é APAGADO
+#    • palavrão durante o castigo → apaga e AUMENTA +5 minutos (e assim por diante)
+#    • quando o tempo acaba  → o bot não avisa nada, só volta ao normal
+
+PALAVROES_PROIBIDOS = [
+    "puta", "puto", "putaria",
+    "porra", "caralho", "carai", "krl", "kct",
+    "merda", "bosta",
+    "cu", "cuzão", "cuzao",
+    "arrombado", "arrombada",
+    "fdp", "filho da puta", "filha da puta",
+    "desgraça", "desgracado", "desgraçada",
+    "viado", "vtnc", "vsf",
+    "vai se foder", "vai tomar no cu",
+    "foda", "foder", "fodase", "foda-se", "fudido", "fudida",
+    "cacete", "inferno", "pqp", "pnc",
+    "buceta", "piroca", "rola",
+    "corno", "corna", "babaca",
+    "otário", "otaria", "idiota", "imbecil", "retardado",
+    "vagabundo", "vagabunda", "lixo",
+    "escroto", "escrota",
+]
+
+PALAVROES_AVISOS_MAX          = 3      # quantos avisos antes de ativar (o 4º palavrão ativa o castigo)
+PALAVROES_AVISO_APAGA_EM      = 60     # segundos até o aviso do bot sumir (1 minuto)
+PALAVROES_CASTIGO_INICIAL_MIN = 10     # minutos de castigo quando ativa
+PALAVROES_CASTIGO_EXTRA_MIN   = 5      # minutos somados a cada palavrão durante o castigo
+PALAVROES_APAGAR_NOS_AVISOS   = False  # True = também apaga a mensagem nos 3 primeiros avisos
+PALAVROES_RESET_AVISOS_HORAS  = 24     # sem falar palavrão por esse tempo = avisos zerados
+
+# troca de números/símbolos por letras ("p0rra", "m3rda", "put@")
+_PALAVROES_LEET = str.maketrans({
+    "0": "o", "1": "i", "3": "e", "4": "a", "5": "s", "7": "t", "@": "a", "$": "s",
+})
+
+
+def _normalizar_palavrao(texto: str) -> str:
+    """Minúsculo, sem acento, sem zero-width, leet destrinchado, símbolos viram espaço
+    e letras repetidas viram uma só ('caralhooo' -> 'caralho')."""
+    texto = unicodedata.normalize("NFKD", texto.lower())
+    texto = "".join(c for c in texto if unicodedata.category(c) not in ("Mn", "Cf"))
+    texto = texto.translate(_PALAVROES_LEET)
+    texto = re.sub(r"[^a-z0-9]+", " ", texto)
+    texto = re.sub(r"([a-z0-9])\1+", r"\1", texto)
+    return texto.strip()
+
+
+_PALAVROES_NORMALIZADOS = sorted(
+    {_normalizar_palavrao(p) for p in PALAVROES_PROIBIDOS if _normalizar_palavrao(p)},
+    key=len, reverse=True,
+)
+# palavra inteira (não pega "curso", "computador"...), aceitando plural com "s"
+_PALAVROES_REGEX = re.compile(
+    r"(?<![a-z0-9])(?:" + "|".join(re.escape(p) for p in _PALAVROES_NORMALIZADOS) + r")s?(?![a-z0-9])"
+)
+# letras soltas separadas por espaço: "p u t a", "p.u.t.a"
+_PALAVROES_LETRAS_SOLTAS = re.compile(r"(?<![a-z0-9])(?:[a-z0-9] ){2,}[a-z0-9](?![a-z0-9])")
+
+
+def contem_palavrao(texto: str) -> bool:
+    if not texto:
+        return False
+    # links, menções e emojis customizados não contam
+    texto = re.sub(r"https?://\S+", " ", texto)
+    texto = re.sub(r"<a?:\w+:\d+>|<[@#][&!]?\d+>", " ", texto)
+    norm = _normalizar_palavrao(texto)
+    if _PALAVROES_REGEX.search(norm):
+        return True
+    juntado = _PALAVROES_LETRAS_SOLTAS.sub(lambda m: m.group(0).replace(" ", ""), norm)
+    return juntado != norm and bool(_PALAVROES_REGEX.search(juntado))
+
+
+class ModeracaoCog(commands.Cog, name="MonstraoModeracao"):
+    """👹 Apaga palavrões, dá avisos e aplica castigo progressivo."""
+
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+        self._ativo: dict = {}     # guild_id -> bool (cache do on/off salvo no config)
+        self._avisos: dict = {}    # (guild_id, user_id) -> {"n": int, "ultimo": datetime}
+        self._castigos: dict = {}  # (guild_id, user_id) -> datetime (UTC) em que o castigo acaba
+
+    # ───────────── estado on/off (salvo no monstrao_config.json) ─────────────
+
+    def _esta_ativo(self, guild_id: int) -> bool:
+        if guild_id not in self._ativo:
+            self._ativo[guild_id] = bool(get_config(guild_id).get("palavroes_ativo", False))
+        return self._ativo[guild_id]
+
+    def _definir_ativo(self, guild_id: int, valor: bool) -> None:
+        self._ativo[guild_id] = valor
+        set_config_value(guild_id, "palavroes_ativo", valor)
+        if not valor:  # desligou: zera avisos e castigos desse servidor
+            self._avisos = {k: v for k, v in self._avisos.items() if k[0] != guild_id}
+            self._castigos = {k: v for k, v in self._castigos.items() if k[0] != guild_id}
+
+    # ───────────── comando ─────────────
+
+    @commands.command(name="palavrões", aliases=["palavroes", "palavrão", "palavrao"])
+    @commands.guild_only()
+    @commands.has_permissions(manage_guild=True)
+    async def palavroes_cmd(self, ctx: commands.Context, estado: str = None):
+        estado = (estado or "").strip().lower()
+
+        if estado in ("on", "ligar", "ligado", "ativar", "ativo"):
+            self._definir_ativo(ctx.guild.id, True)
+            await ctx.send(embed=embed_ok(
+                "🚫 Moderação de Palavrões LIGADA!!",
+                f"agora eu fico de olho em tudo!! 👹🔥\n\n"
+                f"**1º ao {PALAVROES_AVISOS_MAX}º palavrão** → aviso (some em 1 minuto)\n"
+                f"**{PALAVROES_AVISOS_MAX + 1}º palavrão** → castigo de **{PALAVROES_CASTIGO_INICIAL_MIN} min** "
+                f"(palavrão fala = apagado)\n"
+                f"**palavrão durante o castigo** → apago e somo **+{PALAVROES_CASTIGO_EXTRA_MIN} min**"
+            ))
+        elif estado in ("off", "desligar", "desligado", "desativar", "inativo"):
+            self._definir_ativo(ctx.guild.id, False)
+            await ctx.send(embed=embed_ok(
+                "✅ Moderação de Palavrões DESLIGADA!!",
+                "tá liberado o vocabulário colorido 😅 (avisos e castigos foram zerados)"
+            ))
+        else:
+            status = "🟢 **ligada**" if self._esta_ativo(ctx.guild.id) else "🔴 **desligada**"
+            await ctx.send(embed=embed_info(
+                "🚫 Moderação de Palavrões",
+                f"status: {status}\n\nuse `m!palavrões on` ou `m!palavrões off` 👹"
+            ))
+
+    # ───────────── ações do bot ─────────────
+
+    async def _apagar(self, message: discord.Message) -> None:
+        try:
+            await message.delete()
+        except discord.HTTPException:
+            pass  # sem permissão ou já apagada
+
+    async def _avisar(self, canal: discord.abc.Messageable, texto: str) -> None:
+        try:
+            await canal.send(texto, delete_after=PALAVROES_AVISO_APAGA_EM)
+        except discord.HTTPException:
+            pass
+
+    # ───────────── lógica principal ─────────────
+
+    async def _checar(self, message: discord.Message) -> None:
+        if message.author.bot or not message.guild:
+            return
+        gid = message.guild.id
+        if not self._esta_ativo(gid):
+            return
+        if not contem_palavrao(message.content):
+            return
+
+        # nunca pune o próprio comando de ligar/desligar
+        if message.content.startswith(tuple(PREFIXOS)):
+            ctx = await self.bot.get_context(message)
+            if ctx.command and ctx.command.name == "palavrões":
+                return
+
+        chave = (gid, message.author.id)
+        agora = datetime.now(timezone.utc)
+        autor = message.author.mention
+
+        # castigo que já acabou: limpa em silêncio (o bot não avisa)
+        fim = self._castigos.get(chave)
+        if fim and agora >= fim:
+            self._castigos.pop(chave, None)
+            self._avisos.pop(chave, None)
+            fim = None
+
+        # ── castigo ativo: apaga e aumenta o tempo ──
+        if fim:
+            await self._apagar(message)
+            fim = fim + timedelta(minutes=PALAVROES_CASTIGO_EXTRA_MIN)
+            self._castigos[chave] = fim
+            await self._avisar(
+                message.channel,
+                f"{autor} insistiu, né?? 😤 apaguei de novo e o castigo aumentou "
+                f"**+{PALAVROES_CASTIGO_EXTRA_MIN} min**!! termina <t:{int(fim.timestamp())}:R> 👹"
+            )
+            return
+
+        # ── fase de avisos ──
+        dados = self._avisos.get(chave)
+        if dados and agora - dados["ultimo"] > timedelta(hours=PALAVROES_RESET_AVISOS_HORAS):
+            dados = None
+        n = (dados["n"] if dados else 0) + 1
+
+        if n <= PALAVROES_AVISOS_MAX:
+            self._avisos[chave] = {"n": n, "ultimo": agora}
+            if PALAVROES_APAGAR_NOS_AVISOS:
+                await self._apagar(message)
+            restam = PALAVROES_AVISOS_MAX - n
+            extra = (
+                f"ainda tem **{restam}** aviso(s) antes do castigo!!"
+                if restam > 0 else
+                "**esse foi o último aviso!!** o próximo ativa o castigo 😈"
+            )
+            await self._avisar(
+                message.channel,
+                f"{autor} ei, guerreiro(a)!! sem palavrão aqui na CSI!! 👹🚫\n"
+                f"⚠️ **aviso {n}/{PALAVROES_AVISOS_MAX}** — {extra}"
+            )
+            return
+
+        # ── 4º palavrão: ATIVA o castigo ──
+        self._avisos.pop(chave, None)
+        fim = agora + timedelta(minutes=PALAVROES_CASTIGO_INICIAL_MIN)
+        self._castigos[chave] = fim
+        await self._apagar(message)
+        await self._avisar(
+            message.channel,
+            f"{autor} estourou os {PALAVROES_AVISOS_MAX} avisos!! 🔥👹\n"
+            f"⛔ castigo ativado por **{PALAVROES_CASTIGO_INICIAL_MIN} minutos** — "
+            f"todo palavrão seu vai sumir, e se insistir eu somo **+{PALAVROES_CASTIGO_EXTRA_MIN} min**!! "
+            f"termina <t:{int(fim.timestamp())}:R>"
+        )
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        await self._checar(message)
+
+    @commands.Cog.listener()
+    async def on_message_edit(self, before: discord.Message, after: discord.Message):
+        # pega quem edita a mensagem pra colocar o palavrão depois
+        if before.content == after.content:
+            return
+        await self._checar(after)
+
+
+# ══════════════════════════════════════════════════════════════════
 #  🚀  INICIALIZAÇÃO
 # ══════════════════════════════════════════════════════════════════
 
@@ -3883,6 +4124,7 @@ async def _main():
         await bot.add_cog(TicketCog(bot))
         await bot.add_cog(PrivadoCog(bot))
         await bot.add_cog(ListaCog(bot))
+        await bot.add_cog(ModeracaoCog(bot))
 
         # Registra as views persistentes (sobrevivem a restarts)
         bot.add_view(VMPainelView(bot.cogs["MonstraoVoiceMaster"]))
